@@ -13,11 +13,7 @@ Run Claude Code inside an isolated Docker container with access to only one fold
 
 ### 1. Open Docker on your machine
 
-```bash
-open -a Docker
-```
-
-Or just open the application as you would open any application.
+Just open the application as you would open any application.
 
 
 ### 2. Build the image
@@ -27,19 +23,33 @@ docker build -t safe-claude .
 ```
 This takes a few minutes if you build the image for the first time.
 
-### 3. Run the container
+### 3. Create the container
 
 ```bash
-docker run -it --rm \
+docker run -dit --name your_container_name \
+  --restart unless-stopped \
   -v /path/to/your/folder:/workspace \
   safe-claude
 ```
+Replace `/path/to/your/folder` with the local directory you want Claude to work in and `your_container_name` with a name of your choice.
 
-Replace `/path/to/your/folder` with the local directory you want Claude to work in.
+The `--restart unless-stopped` flag ensures the container restarts automatically after a machine reboot. If you stop the container manually (e.g. with `docker stop`), it will stay stopped until you explicitly start it again.
 
-This will open the container in the command line. you will notice this because it will say something like ```root@123456f338bb:/workspace``` in your command line path.
+You can list running containers via ```docker ps```
 
-### 4. Start Claude Code
+If you want to list all containers including stopped containers: ```docker ps -a```
+
+### 4. Enter the container
+
+```bash
+docker exec -it your_container_name /bin/bash
+```
+
+You will notice you are inside the container because your command line path will say something like `root@123456f338bb:/workspace`.
+
+To exit the container, type `exit` or press `Ctrl+D`. The container will stop but can be restarted with the same `docker start -i your_container_name` command.
+
+### 5. Start Claude Code
 
 Inside the container:
 
@@ -47,9 +57,7 @@ Inside the container:
 claude
 ```
 
-This will give you a link for a browser-based OAuth flow to authenticate with your Anthropic account. Note: authentication does not persist between container restarts — you will need to log in each time.
-
-To exit the container, type `exit` or press `Ctrl+D`.
+This will give you a link for a browser-based OAuth flow to authenticate with your Anthropic account. Note: everytime you create a new container, you will have to authenticate within the container.
 
 ## What's included in the container
 
