@@ -9,21 +9,70 @@ Run Claude Code inside an isolated Docker container with access to only one fold
 - Docker installed on your host machine
 - An Anthropic Pro / Max account
 
-## Usage
+---
+
+## Quick Start
 
 ### 1. Open Docker on your machine
 
 Just open the application as you would open any application.
 
+### 2. Run the installer
 
-### 2. Build the image
+**macOS / Linux:**
+```bash
+cd safe-claude
+./install.sh
+```
+
+**Windows** (PowerShell):
+```powershell
+cd safe-claude
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+The installer will:
+- Check that Docker is running
+- Build the `safe-claude` Docker image (takes a few minutes the first time)
+- Install the `safe-claude` command to a directory on your PATH
+
+### 3. Use it
+
+**macOS / Linux:**
+```bash
+safe-claude /path/to/your/project
+```
+
+**Windows:**
+```powershell
+safe-claude C:\path\to\your\project
+```
+
+That's it. The command will:
+- **Create** a new container for that folder if one doesn't exist yet
+- **Start** the container if it exists but is stopped
+- **Drop you into a claude session** inside the container with `/workspace` pointing to your folder
+
+
+## How containers are managed
+
+Each folder gets its own container. The container name is derived deterministically from the folder path (e.g. `safe-claude-myproject-a3f2b1c8`), so running `safe-claude /path/to/your/project` always connects to the same container.
+
+Containers are created with `--restart unless-stopped`, so they survive machine reboots automatically.
+
+---
+
+## Manual Setup
+
+If you prefer to manage Docker manually, here are the individual steps:
+
+### Build the image
 
 ```bash
 docker build -t safe-claude .
 ```
-This takes a few minutes if you build the image for the first time.
 
-### 3. Create the container
+### Create the container
 
 ```bash
 docker run -dit --name your_container_name \
@@ -31,15 +80,14 @@ docker run -dit --name your_container_name \
   -v /path/to/your/folder:/workspace \
   safe-claude
 ```
+
 Replace `/path/to/your/folder` with the local directory you want Claude to work in and `your_container_name` with a name of your choice.
 
-The `--restart unless-stopped` flag ensures the container restarts automatically after a machine reboot. If you stop the container manually (e.g. with `docker stop`), it will stay stopped until you explicitly start it again.
+You can list running containers via `docker ps`
 
-You can list running containers via ```docker ps```
+If you want to list all containers including stopped containers: `docker ps -a`
 
-If you want to list all containers including stopped containers: ```docker ps -a```
-
-### 4. Enter the container
+### Enter the container
 
 ```bash
 docker exec -it your_container_name /bin/bash
@@ -47,17 +95,9 @@ docker exec -it your_container_name /bin/bash
 
 You will notice you are inside the container because your command line path will say something like `root@123456f338bb:/workspace`.
 
-To exit the container, type `exit` or press `Ctrl+D`. The container will stop but can be restarted with the same `docker start -i your_container_name` command.
+To exit the container, type `exit` or press `Ctrl+D`. The container will stop but can be restarted with `docker start -i your_container_name`.
 
-### 5. Start Claude Code
-
-Inside the container:
-
-```bash
-claude
-```
-
-This will give you a link for a browser-based OAuth flow to authenticate with your Anthropic account. Note: everytime you create a new container, you will have to authenticate within the container.
+---
 
 ## What's included in the container
 
