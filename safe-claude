@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# safe-claude <path_to_folder>
+#
+# Enter (or create) a Docker container that mounts the given folder as
+# /workspace and has Claude Code pre-installed.
+# ---------------------------------------------------------------------------
+
+IMAGE_NAME="safe-claude"
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+usage() {
+  echo "Usage: safe-claude <path_to_folder>"
+  echo ""
+  echo "  Enters the Docker container for <path_to_folder>."
+  echo "  Creates the container if it does not exist yet."
+  echo ""
+  echo "  Run install.sh first to build the '${IMAGE_NAME}' Docker image."
+  exit 1
+}
+
+err() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+# Derive a stable container name from an absolute path.
+# Format: safe-claude-<basename>-<first-8-chars-of-md5>
+container_name_for_path() {
+  local abspath="$1"
+  local base
+  base=$(basename "$abspath" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')
+  local hash
+  # md5sum on Linux, md5 on macOS
+  if command -v md5sum &>/dev/null; then
+    hash=$(printf '%s' "$abspath" | md5sum | cut -c1-8)
+  else
+    hash=$(printf '%s' "$abspath" | md5 | cut -c1-8)
+  fi
+  echo "safe-claude-${base}-${hash}"
+}
+
+# ── argument validation ─────────────────────────────────────────────────────
+
+if [[ $# -eq 0 ]]; then
+  usage
+fi
+
+FOLDER_PATH="$1"
+
+# Resolve to absolute path (works even if the path contains symlinks)
+if command -v realpath &>/dev/null; then
+  ABS_PATH=$(realpath "$FOLDER_PATH")
+else
+  ABS_PATH=$(cd "$FOLDER_PATH" 2>/dev/null && pwd) \
+    || err "Path does not exist: $FOLDER_PATH"
+fi
+
+[[ -d "$ABS_PATH" ]] || err "Not a directory: $FOLDER_PATH"
+
+CONTAINER="$(container_name_for_path "$ABS_PATH")"
+
+# ── pre-flight checks ───────────────────────────────────────────────────────
+
+command -v docker &>/dev/null || err "Docker is not installed or not on PATH."
+
+if ! docker info &>/dev/null; then
+  err "Docker daemon is not running. Please start Docker and try again."
+fi
+
+if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+  err "'${IMAGE_NAME}' Docker image not found. Run install.sh to build it first."
+fi
+
+# ── container lifecycle ─────────────────────────────────────────────────────
+
+if ! docker container inspect "$CONTAINER" &>/dev/null; then
+  # Container does not exist yet — create it
+  echo "No container found for this folder. Creating '${CONTAINER}'..."
+  docker run -dit \
+    --name "$CONTAINER" \
+    --restart unless-stopped \
+    -v "${ABS_PATH}:/workspace" \
+    "$IMAGE_NAME" \
+    > /dev/null
+  echo "Container created."
+else
+  # Container exists — start it if it is not already running
+  STATUS=$(docker container inspect --format '{{.State.Status}}' "$CONTAINER")
+  if [[ "$STATUS" != "running" ]]; then
+    echo "Starting container '${CONTAINER}'..."
+    docker start "$CONTAINER" > /dev/null
+  fi
+fi
+
+# ── enter the container ─────────────────────────────────────────────────────
+
+echo "Entering container '${CONTAINER}' (folder: ${ABS_PATH})..."
+echo "Type 'exit' or press Ctrl+D to leave the container."
+echo ""
+docker exec -it "$CONTAINER" claude
