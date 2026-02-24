@@ -7,6 +7,7 @@ FROM node:20-slim
 # 4. XML (used by many R packages)
 # 5. Font / graphics stack (R packages: systemfonts, textshaping, ragg)
 # 6. R base
+# 7. Python3 + venv
 
 RUN apt-get update && apt-get install -y \
     git curl wget ca-certificates gnupg \
@@ -16,18 +17,12 @@ RUN apt-get update && apt-get install -y \
     libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
     libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev \
     r-base \
+    python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Quietly (-q) install conda (ARCH ensures it works on windows, linux and mac)
-# This also installes python and pip
-RUN ARCH=$(uname -m) && \
-    wget -q -O /miniconda.sh "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${ARCH}.sh" \
-    && bash /miniconda.sh -b -p /opt/conda \
-    && rm /miniconda.sh \
-    && /opt/conda/bin/conda clean -afy
-
-# add the conda binary to PATH so that we can use conda and python from the command line
-ENV PATH="/opt/conda/bin:$PATH"
+# Create a venv and add it to PATH so python/pip always resolve to it
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # install claude-code
 RUN npm install -g @anthropic-ai/claude-code

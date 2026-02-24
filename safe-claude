@@ -82,7 +82,6 @@ if ! docker container inspect "$CONTAINER" &>/dev/null; then
   echo "No container found for this folder. Creating '${CONTAINER}'..."
   docker run -dit \
     --name "$CONTAINER" \
-    --restart unless-stopped \
     -v "${ABS_PATH}:/workspace" \
     "$IMAGE_NAME" \
     > /dev/null
