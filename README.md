@@ -65,9 +65,8 @@ That's it. The command will:
 
 Each folder gets its own container. The container name is derived deterministically from the folder path (e.g. `safe-claude-myproject-a3f2b1c8`), so running `safe-claude /path/to/your/project` always connects to the same container.
 
-## Ho
 
----
+-----------
 
 ## Manual Setup
 
