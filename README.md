@@ -59,9 +59,9 @@ safe-claude C:\path\to\your\project
 ```
 
 That's it. The command will:
-- **Create** a new container for that folder if one doesn't exist yet
-- **Start** the container if it exists but is stopped
-- **Drop you into a claude session** inside the container with `/workspace` pointing to your folder
+- **Create** a new container, which with the specified folder as volume. 
+- **Start** the container
+- **Drop you into a claude session** inside the container with `/workspace` pointing to your folder. 
 
 
 ## How containers are managed
