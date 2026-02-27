@@ -71,10 +71,6 @@ Each folder gets its own container. The container name is derived deterministica
 
 -----------
 
-
-
-
-
 ## Manual Setup
 
 If you prefer to manage Docker manually, here are the individual steps:
@@ -95,10 +91,6 @@ docker run -dit --name your_container_name \
 
 Replace `/path/to/your/folder` with the local directory you want Claude to work in and `your_container_name` with a name of your choice.
 
-You can list running containers via `docker ps`
-
-If you want to list all containers including stopped containers: `docker ps -a`
-
 ### Enter the container
 
 ```bash
@@ -108,6 +100,11 @@ docker exec -it your_container_name /bin/bash
 You will notice you are inside the container because your command line path will say something like `root@123456f338bb:/workspace`.
 
 To exit the container, type `exit` or press `Ctrl+D`. The container will stop but can be restarted with `docker start -i your_container_name`.
+
+### Run claued Inside the container
+```bash
+claude
+```
 
 ---
 
