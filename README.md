@@ -4,6 +4,9 @@ Run Claude Code inside an isolated Docker container with access to only one fold
 
 **Why use this?** Claude Code is a powerful autonomous agent that can read, write, and delete files. Running it directly on your machine gives it access to your home directory, credentials, and other sensitive data. This project eliminates that risk by sandboxing Claude inside a container where only a single folder you choose is ever visible.
 
+**Security Model** The container has no access to your home directory, credentials, or other files. Only the folder you explicitly mount is visible to Claude. Within the mounted folder Claude can write/delete/corrupt everything with no restrictions.
+
+
 ## Requirements
 
 - Docker installed on your host machine
@@ -68,6 +71,10 @@ Each folder gets its own container. The container name is derived deterministica
 
 -----------
 
+
+
+
+
 ## Manual Setup
 
 If you prefer to manage Docker manually, here are the individual steps:
@@ -111,7 +118,3 @@ To exit the container, type `exit` or press `Ctrl+D`. The container will stop bu
 - Python 3 + Conda (Miniconda)
 - R
 - Common build tools
-
-## Security model
-
-The container has no access to your home directory, credentials, or other files. Only the folder you explicitly mount is visible to Claude. Within the mounted folder Claude can write/delete/corrupt everything with no restrictions.
