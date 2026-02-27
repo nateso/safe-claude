@@ -75,36 +75,27 @@ Each folder gets its own container. The container name is derived deterministica
 
 If you prefer to manage Docker manually, here are the individual steps:
 
-### Build the image
-
 ```bash
+# build the image
 docker build -t safe-claude .
-```
 
-### Create the container
-
-```bash
+# create the container
 docker run -dit --name your_container_name \
   -v /path/to/your/folder:/workspace \
   safe-claude
+
+# enter the container
+docker exec -it your_container_name /bin/bash
+
+# Run claude inside the container
+claude
 ```
 
 Replace `/path/to/your/folder` with the local directory you want Claude to work in and `your_container_name` with a name of your choice.
 
-### Enter the container
-
-```bash
-docker exec -it your_container_name /bin/bash
-```
-
 You will notice you are inside the container because your command line path will say something like `root@123456f338bb:/workspace`.
 
-To exit the container, type `exit` or press `Ctrl+D`. The container will stop but can be restarted with `docker start -i your_container_name`.
-
-### Run claued Inside the container
-```bash
-claude
-```
+To exit the container, type `exit` or press `Ctrl+D`.
 
 ---
 
