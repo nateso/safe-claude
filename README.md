@@ -17,17 +17,25 @@ Run Claude Code inside an isolated Docker container with access to only one fold
 
 Just open the application as you would open any application.
 
-### 2. Run the installer
+### 2. Clone this Repository to your machine
+
+```bash
+# this will create a folder safe-claude in your current working directory with all code from this repository
+git clone https://github.com/nateso/safe-claude.git
+
+# enter the folder
+cd safe-claude
+```
+
+### 3. Run the installer
 
 **macOS / Linux:**
 ```bash
-cd safe-claude
 ./install.sh
 ```
 
 **Windows** (PowerShell):
 ```powershell
-cd safe-claude
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
@@ -36,8 +44,7 @@ The installer will:
 - Build the `safe-claude` Docker image (takes a few minutes the first time)
 - Install the `safe-claude` command to a directory on your PATH
 
-### 3. Use it
-
+### 4. Use it
 **macOS / Linux:**
 ```bash
 safe-claude /path/to/your/project
@@ -58,7 +65,7 @@ That's it. The command will:
 
 Each folder gets its own container. The container name is derived deterministically from the folder path (e.g. `safe-claude-myproject-a3f2b1c8`), so running `safe-claude /path/to/your/project` always connects to the same container.
 
-Containers are created with `--restart unless-stopped`, so they survive machine reboots automatically.
+## Ho
 
 ---
 
@@ -76,7 +83,6 @@ docker build -t safe-claude .
 
 ```bash
 docker run -dit --name your_container_name \
-  --restart unless-stopped \
   -v /path/to/your/folder:/workspace \
   safe-claude
 ```
