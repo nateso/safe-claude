@@ -64,6 +64,27 @@ That's it. The command will:
 - **Drop you into a claude session** inside the container with `/workspace` pointing to your folder. 
 
 
+### Skipping permission prompts
+
+By default Claude asks before each file edit or command. To let it run autonomously, append `--dangerously-skip-permissions` (any extra arguments are forwarded to `claude`):
+
+**macOS / Linux:**
+```bash
+safe-claude /path/to/your/project --dangerously-skip-permissions
+```
+
+**Windows:**
+```powershell
+safe-claude C:\path\to\your\project --dangerously-skip-permissions
+```
+
+> **Warning:** In this mode Claude can read, modify, delete, and run any command inside the mounted folder **without asking**. The container still cannot see anything outside that folder, but everything *inside* it is fair game — only use it on a folder you trust and have backed up.
+
+Claude always runs as a non-root user (required — Claude Code refuses `--dangerously-skip-permissions` when running as root). On Linux it runs as *your* host user, so files it creates in the folder are owned by you rather than root or an unrelated container user; on macOS/Windows, Docker Desktop handles ownership. To install system packages, open a separate root shell: `docker exec -u root -it <container_name> bash`.
+
+> **Upgrading from an earlier version?** Rebuild the image (`./install.sh`, answer *yes* to rebuild) and remove any old containers so they are recreated as the `node` user: `docker rm -f <container_name>`.
+
+
 ## How containers are managed
 
 Each folder gets its own container. The container name is derived deterministically from the folder path (e.g. `safe-claude-myproject-a3f2b1c8`), so running `safe-claude /path/to/your/project` always connects to the same container.
@@ -93,7 +114,7 @@ claude
 
 Replace `/path/to/your/folder` with the local directory you want Claude to work in and `your_container_name` with a name of your choice.
 
-You will notice you are inside the container because your command line path will say something like `root@123456f338bb:/workspace`.
+You will notice you are inside the container because your command line path will say something like `node@123456f338bb:/workspace`.
 
 To exit the container, type `exit` or press `Ctrl+D`.
 

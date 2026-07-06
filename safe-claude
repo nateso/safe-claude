@@ -13,11 +13,14 @@ IMAGE_NAME="safe-claude"
 # ── helpers ────────────────────────────────────────────────────────────────
 
 usage() {
-  echo "Usage: safe-claude <path_to_folder>"
+  echo "Usage: safe-claude <path_to_folder> [claude-args...]"
   echo ""
-  echo "  Enters the Docker container for <path_to_folder>."
+  echo "  Enters the Docker container for <path_to_folder> and launches Claude Code."
+  echo "  Any extra arguments are forwarded to 'claude', e.g.:"
+  echo ""
+  echo "    safe-claude ~/project --dangerously-skip-permissions"
+  echo ""
   echo "  Creates the container if it does not exist yet."
-  echo ""
   echo "  Run install.sh first to build the '${IMAGE_NAME}' Docker image."
   exit 1
 }
@@ -50,6 +53,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 FOLDER_PATH="$1"
+shift   # any remaining args ("$@") are forwarded verbatim to `claude`
 
 # Resolve to absolute path (works even if the path contains symlinks)
 if command -v realpath &>/dev/null; then
@@ -98,6 +102,38 @@ fi
 # ── enter the container ─────────────────────────────────────────────────────
 
 echo "Entering container '${CONTAINER}' (folder: ${ABS_PATH})..."
+
+# Non-blocking heads-up if skip-permissions was requested.
+case " $* " in
+  *" --dangerously-skip-permissions "*)
+    echo "WARNING: Claude will read/modify/delete and run commands in" >&2
+    echo "         ${ABS_PATH} WITHOUT asking. Make sure you trust and have backed up this folder." >&2
+    ;;
+esac
+
+# Decide which user Claude runs as inside the container.
+#
+# Claude Code refuses --dangerously-skip-permissions as root, so it must run as a
+# non-root user. On native Linux, Docker maps bind-mount ownership by numeric UID,
+# so we run Claude as *your* host UID/GID -- that way files it writes in the mounted
+# folder are owned by you, not by an unrelated container user. On macOS/Windows,
+# Docker Desktop maps ownership for us, so the built-in 'node' user is enough.
+RUN_USER="node"
+if [[ "$(uname -s)" == "Linux" ]]; then
+  HOST_UID="$(id -u)"
+  HOST_GID="$(id -g)"
+  if [[ "$HOST_UID" -ne 0 ]]; then
+    # Ensure the container has a passwd/group entry for your UID/GID (so tools that
+    # look up the user by ID don't fail) and that HOME is writable by it. Idempotent.
+    docker exec -u 0 "$CONTAINER" sh -c '
+      getent group  "$2" >/dev/null || echo "hostgrp:x:$2:"                                     >> /etc/group
+      getent passwd "$1" >/dev/null || echo "hostuser:x:$1:$2:host user:/home/node:/bin/bash"   >> /etc/passwd
+      chown -R "$1:$2" /home/node
+    ' _ "$HOST_UID" "$HOST_GID"
+    RUN_USER="${HOST_UID}:${HOST_GID}"
+  fi
+fi
+
 echo "Type 'exit' or press Ctrl+D to leave the container."
 echo ""
-docker exec -it "$CONTAINER" claude
+docker exec -it -u "$RUN_USER" -e HOME=/home/node "$CONTAINER" claude "$@"

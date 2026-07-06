@@ -19,7 +19,10 @@
 
 param(
     [Parameter(Position = 0)]
-    [string]$FolderPath
+    [string]$FolderPath,
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ClaudeArgs
 )
 
 $IMAGE_NAME = "safe-claude"
@@ -41,11 +44,14 @@ function Get-ContainerName {
 # ── argument validation ───────────────────────────────────────────────────────
 
 if (-not $FolderPath) {
-    Write-Host "Usage: safe-claude <path_to_folder>"
+    Write-Host "Usage: safe-claude <path_to_folder> [claude-args...]"
     Write-Host ""
-    Write-Host "  Enters the Docker container for <path_to_folder>."
+    Write-Host "  Enters the Docker container for <path_to_folder> and launches Claude Code."
+    Write-Host "  Any extra arguments are forwarded to 'claude', e.g.:"
+    Write-Host ""
+    Write-Host "    safe-claude C:\project --dangerously-skip-permissions"
+    Write-Host ""
     Write-Host "  Creates the container if it does not exist yet."
-    Write-Host ""
     Write-Host "  Run install.ps1 first to build the '$IMAGE_NAME' Docker image."
     exit 1
 }
@@ -102,6 +108,12 @@ if ($LASTEXITCODE -ne 0) {
 # ── enter the container ───────────────────────────────────────────────────────
 
 Write-Info "Entering container '$ContainerName' (folder: $AbsPath)..."
+
+if ($ClaudeArgs -contains "--dangerously-skip-permissions") {
+    Write-Host "  WARNING: Claude will read/modify/delete and run commands in $AbsPath" -ForegroundColor Yellow
+    Write-Host "  WITHOUT asking. Make sure you trust and have backed up this folder." -ForegroundColor Yellow
+}
+
 Write-Info "Type 'exit' or press Ctrl+D to leave the container."
 Write-Info ""
-docker exec -it $ContainerName claude
+docker exec -it $ContainerName claude @ClaudeArgs

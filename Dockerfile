@@ -32,4 +32,11 @@ RUN npm install -g @anthropic-ai/claude-code
 # set the working directory
 WORKDIR /workspace
 
+# Run as the built-in non-root 'node' user (UID 1000).
+# Required because Claude Code refuses --dangerously-skip-permissions as root,
+# and it also stops Claude from leaving root-owned files in the mounted folder.
+RUN mkdir -p /home/node/.claude && chown -R node:node /home/node/.claude
+ENV HOME=/home/node
+USER node
+
 CMD ["bash"]
