@@ -24,19 +24,23 @@ RUN apt-get update && apt-get install -y \
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# install claude-code
-RUN npm install -g @anthropic-ai/claude-code
-# or as an alterative, this should also work
-#RUN curl -fsSL https://claude.ai/install.sh | bash
-
 # set the working directory
 WORKDIR /workspace
 
 # Run as the built-in non-root 'node' user (UID 1000).
 # Required because Claude Code refuses --dangerously-skip-permissions as root,
 # and it also stops Claude from leaving root-owned files in the mounted folder.
-RUN mkdir -p /home/node/.claude && chown -R node:node /home/node/.claude
+RUN mkdir -p /home/node/.claude && chown -R node:node /home/node
 ENV HOME=/home/node
+# Anthropic's native installer puts claude in ~/.local/bin, so add it to PATH.
+ENV PATH="/home/node/.local/bin:$PATH"
 USER node
+
+# Install Claude Code with Anthropic's native installer (NOT `npm install -g`).
+# It installs into the node user's home (~/.local), which stays writable at
+# runtime, so Claude's built-in auto-updater works. A global npm install would
+# land in a root-owned prefix that the non-root user cannot update, causing
+# "Auto-update failed: no write permission to npm prefix".
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 CMD ["bash"]

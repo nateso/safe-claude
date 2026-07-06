@@ -123,7 +123,7 @@ To exit the container, type `exit` or press `Ctrl+D`.
 ## What's included in the container
 
 - Node.js 20
-- Claude Code (`@anthropic-ai/claude-code`)
+- Claude Code
 - Python 3 + Conda (Miniconda)
 - R
 - Common build tools
