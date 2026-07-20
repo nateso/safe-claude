@@ -15,7 +15,7 @@ DEFAULT_INSTALL_DIR="/usr/local/bin"
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 info()    { echo "[safe-claude] $*"; }
-success() { echo "[safe-claude] ✓ $*"; }
+success() { echo "[safe-claude] OK $*"; }
 warn()    { echo "[safe-claude] ! $*"; }
 err()     { echo "[safe-claude] Error: $*" >&2; exit 1; }
 
@@ -124,6 +124,9 @@ echo ""
 echo "    safe-claude /path/to/your/project"
 echo ""
 echo "  This will create a sandboxed Docker container for that folder"
-echo "  (if one doesn't exist yet) and drop you into a bash session"
-echo "  with Claude Code ready to use."
+echo "  (if one doesn't exist yet) and launch Claude Code."
+echo ""
+echo "  Add --dangerously-skip-permissions to run Claude without prompts:"
+echo ""
+echo "    safe-claude /path/to/your/project --dangerously-skip-permissions"
 echo ""
