@@ -82,12 +82,45 @@ safe-claude C:\path\to\your\project --dangerously-skip-permissions
 
 Claude always runs as a non-root user (required — Claude Code refuses `--dangerously-skip-permissions` when running as root). On Linux it runs as *your* host user, so files it creates in the folder are owned by you rather than root or an unrelated container user; on macOS/Windows, Docker Desktop handles ownership. To install system packages, open a separate root shell: `docker exec -u root -it <container_name> bash`.
 
-> **Upgrading from an earlier version?** Rebuild the image (`./install.sh`, answer *yes* to rebuild) and remove any old containers so they are recreated as the `node` user: `docker rm -f <container_name>`.
+> **Upgrading from an earlier version?** Just run `safe-claude update` — see [Updating](#updating) below.
 
 
 ## How containers are managed
 
 Each folder gets its own container. The container name is derived deterministically from the folder path (e.g. `safe-claude-myproject-a3f2b1c8`), so running `safe-claude /path/to/your/project` always connects to the same container.
+
+Each container also gets a small per-folder Docker volume (`<container_name>-claude`) mounted at `/home/node/.claude`. This is where Claude Code stores your **login and session history**, so it survives the container being recreated (for example by `safe-claude rebuild`). Your project files are never stored here — they live on your host machine and are only bind-mounted in.
+
+
+## Updating
+
+To upgrade `safe-claude` to the latest version on `main`:
+
+**macOS / Linux:**
+```bash
+safe-claude update
+```
+
+**Windows:**
+```powershell
+safe-claude update
+```
+
+`update` asks for confirmation, then fetches the newest version, replaces the installed `safe-claude` command, and rebuilds the Docker image. It is **non-destructive**: your existing sandboxes are left running exactly as they are. (Pass `-y` to skip the confirmation, or `--force` to reinstall even when already up to date.)
+
+New sandboxes you create after updating automatically use the new image. **Existing** sandboxes keep running the previous image until you explicitly move them over:
+
+```bash
+safe-claude rebuild /path/to/your/project
+```
+
+`rebuild` recreates that one sandbox on the new image. Your Claude login and session history are preserved (they live on the `-claude` volume), and your project files are never touched. It also saves a backup image of the old container (`safe-claude-backup-<folder>-<timestamp>`) as a safety net. **Note:** system packages you installed *inside* the container (via `apt`/`pip`) are not carried over automatically — reinstall them, or recover them from the backup image (`docker run --rm -it <backup_image> bash`).
+
+Check your installed version any time with:
+
+```bash
+safe-claude --version
+```
 
 
 -----------
@@ -101,8 +134,10 @@ If you prefer to manage Docker manually, here are the individual steps:
 docker build -t safe-claude .
 
 # create the container
+# the second -v gives Claude a persistent home for its login/history
 docker run -dit --name your_container_name \
   -v /path/to/your/folder:/workspace \
+  -v your_container_name-claude:/home/node/.claude \
   safe-claude
 
 # enter the container

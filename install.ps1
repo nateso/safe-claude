@@ -15,8 +15,9 @@
         powershell -ExecutionPolicy Bypass -File install.ps1
 #>
 
-$IMAGE_NAME  = "safe-claude"
-$DEFAULT_DIR = "$env:USERPROFILE\AppData\Local\Programs\safe-claude"
+$IMAGE_NAME   = "safe-claude"
+$DEFAULT_DIR  = "$env:USERPROFILE\AppData\Local\Programs\safe-claude"
+$VERSION_FILE = Join-Path $env:LOCALAPPDATA "safe-claude\version"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -107,6 +108,20 @@ powershell.exe -ExecutionPolicy Bypass -File "%~dp0safe-claude.ps1" %*
 "@ | Set-Content -Path $destBat -Encoding ASCII
 
 Write-Success "Files installed."
+
+# ── step 4b: record installed version ─────────────────────────────────────────
+# Store the source commit SHA so 'safe-claude update' can detect "already up to
+# date" and 'safe-claude --version' can report it.
+$verDir = Split-Path -Parent $VERSION_FILE
+if (-not (Test-Path $verDir)) { New-Item -ItemType Directory -Path $verDir -Force | Out-Null }
+$sha = (git -C $ScriptDir rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -eq 0 -and $sha) {
+    Set-Content -Path $VERSION_FILE -Value $sha.Trim()
+    Write-Success "Recorded version $($sha.Trim().Substring(0,8))."
+} else {
+    Set-Content -Path $VERSION_FILE -Value "unknown"
+    Write-Warn "Not a git checkout — recorded version as 'unknown'."
+}
 
 # ── step 5: add to PATH ───────────────────────────────────────────────────────
 

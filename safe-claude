@@ -2,25 +2,33 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# safe-claude <path_to_folder>
+# safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox
+# safe-claude update [-y] [--force]               Update tool + image to latest
+# safe-claude rebuild <path_to_folder> [-y]        Rebuild one sandbox on new image
+# safe-claude --version                            Show installed version
 #
 # Enter (or create) a Docker container that mounts the given folder as
 # /workspace and has Claude Code pre-installed.
 # ---------------------------------------------------------------------------
 
 IMAGE_NAME="safe-claude"
+REPO_URL="${SAFE_CLAUDE_REPO:-https://github.com/nateso/safe-claude.git}"
+VERSION_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/safe-claude/version"
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
 usage() {
-  echo "Usage: safe-claude <path_to_folder> [claude-args...]"
+  echo "Usage:"
+  echo "  safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox for a folder"
+  echo "  safe-claude update [-y] [--force]               Update the tool + image to latest main"
+  echo "  safe-claude rebuild <path_to_folder> [-y]       Move an existing sandbox onto the new image"
+  echo "  safe-claude --version                           Print the installed version"
   echo ""
-  echo "  Enters the Docker container for <path_to_folder> and launches Claude Code."
-  echo "  Any extra arguments are forwarded to 'claude', e.g.:"
+  echo "  Entering a folder creates its container if it does not exist yet and"
+  echo "  launches Claude Code. Any extra arguments are forwarded to 'claude', e.g.:"
   echo ""
   echo "    safe-claude ~/project --dangerously-skip-permissions"
   echo ""
-  echo "  Creates the container if it does not exist yet."
   echo "  Run install.sh first to build the '${IMAGE_NAME}' Docker image."
   exit 1
 }
@@ -28,6 +36,28 @@ usage() {
 err() {
   echo "Error: $*" >&2
   exit 1
+}
+
+info()    { echo "[safe-claude] $*"; }
+success() { echo "[safe-claude] OK $*"; }
+warn()    { echo "[safe-claude] ! $*"; }
+
+# Ask a yes/no question; returns 0 for yes. Default is No.
+confirm() {
+  local reply
+  read -rp "$1 [y/N] " reply
+  reply="${reply:-N}"
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+# Resolve a path to an absolute path (works even with symlinks).
+resolve_abs() {
+  local p="$1"
+  if command -v realpath &>/dev/null; then
+    realpath "$p"
+  else
+    (cd "$p" 2>/dev/null && pwd) || err "Path does not exist: $p"
+  fi
 }
 
 # Derive a stable container name from an absolute path.
@@ -45,6 +75,221 @@ container_name_for_path() {
   fi
   echo "safe-claude-${base}-${hash}"
 }
+
+# ── docker pre-flight ───────────────────────────────────────────────────────
+
+require_docker() {
+  command -v docker &>/dev/null || err "Docker is not installed or not on PATH."
+  docker info &>/dev/null || err "Docker daemon is not running. Please start Docker and try again."
+}
+
+require_image() {
+  docker image inspect "$IMAGE_NAME" &>/dev/null \
+    || err "'${IMAGE_NAME}' Docker image not found. Run install.sh (or 'safe-claude update') to build it first."
+}
+
+# ── version tracking ────────────────────────────────────────────────────────
+
+read_version() {
+  [[ -f "$VERSION_FILE" ]] && head -n1 "$VERSION_FILE"
+}
+
+write_version() {
+  mkdir -p "$(dirname "$VERSION_FILE")"
+  printf '%s\n' "$1" > "$VERSION_FILE"
+}
+
+print_version() {
+  local sha
+  sha="$(read_version || true)"
+  echo "safe-claude ${sha:-unknown}"
+}
+
+# ── update ──────────────────────────────────────────────────────────────────
+
+cmd_update() {
+  local assume_yes=0 force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y|--yes) assume_yes=1; shift ;;
+      --force)  force=1;      shift ;;
+      *) err "Unknown option for 'update': $1 (usage: safe-claude update [-y] [--force])" ;;
+    esac
+  done
+
+  # Locate the on-PATH script file we should replace.
+  local self="$0"
+  [[ "$self" == */* ]] || self="$(command -v "$self")"
+  self="$(resolve_abs "$self")"
+
+  echo "safe-claude update"
+  echo "  Updates the 'safe-claude' command and rebuilds the '${IMAGE_NAME}' image"
+  echo "  from the latest 'main' (${REPO_URL})."
+  echo "  Existing sandboxes are left untouched."
+  echo "  Command file: ${self}"
+  echo ""
+  if [[ "$assume_yes" -ne 1 ]]; then
+    confirm "Proceed?" || { echo "Update cancelled."; return 0; }
+  fi
+
+  command -v git &>/dev/null || err "git is required for 'update' but was not found on PATH."
+  require_docker
+
+  local tmp
+  tmp="$(mktemp -d)"
+  trap "rm -rf '$tmp'" EXIT   # expand $tmp now: it is 'local' and gone by EXIT-trap time
+
+  info "Fetching latest from ${REPO_URL} (branch main)..."
+  git clone --depth 1 --branch main "$REPO_URL" "$tmp" >/dev/null 2>&1 \
+    || err "Failed to clone ${REPO_URL}. Check your network and git installation."
+
+  local new_sha stored_sha
+  new_sha="$(git -C "$tmp" rev-parse HEAD)"
+  stored_sha="$(read_version || true)"
+  if [[ "$force" -ne 1 && -n "$stored_sha" && "$stored_sha" == "$new_sha" ]]; then
+    success "Already up to date (${new_sha:0:8})."
+    return 0
+  fi
+
+  # Replace the installed command atomically (rename => new inode, so this
+  # running process keeps its old inode and is not corrupted mid-run).
+  info "Updating command at ${self}..."
+  local tmpdest="${self}.tmp.$$"
+  if [[ -w "$(dirname "$self")" ]]; then
+    install -m 755 "$tmp/safe-claude" "$tmpdest" && mv -f "$tmpdest" "$self"
+  else
+    info "  '$(dirname "$self")' requires elevated permissions — using sudo."
+    sudo install -m 755 "$tmp/safe-claude" "$tmpdest" && sudo mv -f "$tmpdest" "$self"
+  fi
+  success "Command updated."
+
+  info "Rebuilding Docker image '${IMAGE_NAME}' (this may take a few minutes)..."
+  docker build -t "$IMAGE_NAME" "$tmp" || err "Docker build failed. See output above."
+  success "Image '${IMAGE_NAME}' rebuilt."
+
+  write_version "$new_sha"
+  success "Updated to ${new_sha:0:8}."
+
+  # Report existing sandboxes; do NOT recreate them.
+  local sandboxes
+  sandboxes="$(docker ps -a --filter name=safe-claude- --format '  {{.Names}} ({{.Status}})' || true)"
+  if [[ -n "$sandboxes" ]]; then
+    echo ""
+    warn "Existing sandboxes still run the previous image:"
+    echo "$sandboxes"
+    echo ""
+    echo "  They keep working as-is. To move one onto the new image"
+    echo "  (Claude login/history preserved), run:"
+    echo "      safe-claude rebuild <path>"
+  fi
+}
+
+# ── rebuild (opt-in per-sandbox migration onto the new image) ────────────────
+
+cmd_rebuild() {
+  local assume_yes=0 patharg=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y|--yes) assume_yes=1; shift ;;
+      -*) err "Unknown option for 'rebuild': $1" ;;
+      *)  patharg="$1"; shift ;;
+    esac
+  done
+  [[ -n "$patharg" ]] || err "Usage: safe-claude rebuild <path_to_folder> [-y]"
+
+  require_docker
+  require_image
+
+  local abs
+  abs="$(resolve_abs "$patharg")"
+  [[ -d "$abs" ]] || err "Not a directory: $patharg"
+
+  local container volume
+  container="$(container_name_for_path "$abs")"
+  volume="${container}-claude"
+
+  docker container inspect "$container" &>/dev/null \
+    || err "No sandbox exists for ${abs} (container '${container}'). Nothing to rebuild."
+
+  echo "safe-claude rebuild"
+  echo "  Sandbox: ${container}"
+  echo "  Folder:  ${abs}  (your files here are NOT touched)"
+  echo ""
+  echo "  This recreates the sandbox on the current '${IMAGE_NAME}' image."
+  echo "  Claude login/history is preserved via a Docker volume."
+  echo "  System packages installed inside the container (apt/pip) are NOT carried over"
+  echo "  (a backup image of the old container is made so you can recover them)."
+  echo ""
+  if [[ "$assume_yes" -ne 1 ]]; then
+    confirm "Rebuild this sandbox?" || { echo "Rebuild cancelled."; return 0; }
+  fi
+
+  local tmp
+  tmp="$(mktemp -d)"
+  trap "rm -rf '$tmp'" EXIT   # expand $tmp now: it is 'local' and gone by EXIT-trap time
+
+  # Is /home/node/.claude already backed by a named volume?
+  local uses_volume
+  uses_volume="$(docker inspect --format \
+    '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Name}}{{end}}{{end}}' \
+    "$container")"
+
+  if [[ -z "$uses_volume" ]]; then
+    info "Migrating Claude login/history into volume '${volume}'..."
+    mkdir -p "$tmp/claude"
+    docker cp "$container:/home/node/.claude/." "$tmp/claude/" \
+      || err "Failed to copy /home/node/.claude out of the container."
+    docker volume create "$volume" >/dev/null
+    # Seed the volume via a helper container that has it mounted. We only ever
+    # bind-mount a *named volume* (never a host path), so this works identically
+    # on Linux, macOS, and Docker Desktop for Windows.
+    local helper="${container}-seed"
+    docker rm -f "$helper" &>/dev/null || true
+    docker run -d --name "$helper" -v "$volume:/dest" "$IMAGE_NAME" tail -f /dev/null >/dev/null
+    docker cp "$tmp/claude/." "$helper:/dest/" \
+      || { docker rm -f "$helper" &>/dev/null; err "Failed to seed volume '${volume}'."; }
+    docker exec -u 0 "$helper" sh -c 'chown -R 1000:1000 /dest' || true
+    docker rm -f "$helper" >/dev/null
+    success "Volume '${volume}' seeded from the old container."
+  else
+    info "Sandbox already uses volume '${uses_volume}'; login/history will persist automatically."
+    volume="$uses_volume"
+  fi
+
+  # Safety backup of the whole old container (captures apt/pip installs too).
+  local ts base backup
+  ts="$(date +%Y%m%d-%H%M%S)"
+  base="$(basename "$abs" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
+  backup="safe-claude-backup-${base}-${ts}"
+  info "Creating safety backup image '${backup}'..."
+  docker commit "$container" "$backup" >/dev/null \
+    || warn "Could not create backup image (continuing anyway)."
+
+  info "Removing old container and recreating on the new image..."
+  docker rm -f "$container" >/dev/null
+  docker run -dit \
+    --name "$container" \
+    -v "${abs}:/workspace" \
+    -v "${volume}:/home/node/.claude" \
+    "$IMAGE_NAME" >/dev/null \
+    || err "Failed to recreate container. Your files are safe in ${abs}; backup image: ${backup}."
+
+  success "Sandbox rebuilt on the '${IMAGE_NAME}' image."
+  echo "  Backup of the previous container: image '${backup}'"
+  echo "  Inspect it with:       docker run --rm -it ${backup} bash"
+  echo "  Remove it when done:   docker rmi ${backup}"
+  echo ""
+  echo "  Enter the refreshed sandbox with:  safe-claude ${patharg}"
+}
+
+# ── command dispatch ─────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  update)         shift; cmd_update  "$@"; exit $? ;;
+  rebuild)        shift; cmd_rebuild "$@"; exit $? ;;
+  --version|-v)   print_version; exit 0 ;;
+  help|--help|-h) usage ;;
+esac
 
 # ── argument validation ─────────────────────────────────────────────────────
 
@@ -69,24 +314,20 @@ CONTAINER="$(container_name_for_path "$ABS_PATH")"
 
 # ── pre-flight checks ───────────────────────────────────────────────────────
 
-command -v docker &>/dev/null || err "Docker is not installed or not on PATH."
-
-if ! docker info &>/dev/null; then
-  err "Docker daemon is not running. Please start Docker and try again."
-fi
-
-if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-  err "'${IMAGE_NAME}' Docker image not found. Run install.sh to build it first."
-fi
+require_docker
+require_image
 
 # ── container lifecycle ─────────────────────────────────────────────────────
 
 if ! docker container inspect "$CONTAINER" &>/dev/null; then
-  # Container does not exist yet — create it
+  # Container does not exist yet — create it.
+  # A per-sandbox named volume backs /home/node/.claude so Claude's login and
+  # session history survive container recreation (e.g. 'safe-claude rebuild').
   echo "No container found for this folder. Creating '${CONTAINER}'..."
   docker run -dit \
     --name "$CONTAINER" \
     -v "${ABS_PATH}:/workspace" \
+    -v "${CONTAINER}-claude:/home/node/.claude" \
     "$IMAGE_NAME" \
     > /dev/null
   echo "Container created."

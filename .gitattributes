@@ -1,0 +1,16 @@
+# Enforce LF line endings for all text files — in the repository and on
+# checkout — so the shell scripts stay runnable on Linux, macOS, and WSL no
+# matter which platform the repo was cloned on. git auto-detects binary files
+# and leaves them untouched.
+* text=auto eol=lf
+
+# Extensionless scripts: be explicit so they are always treated as LF text.
+safe-claude text eol=lf
+
+# Windows batch / cmd files need CRLF. (The installer generates safe-claude.bat
+# at runtime; this covers the case where one is ever committed.)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files git must never normalize.
+.DS_Store binary

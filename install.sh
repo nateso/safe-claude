@@ -11,6 +11,7 @@ set -euo pipefail
 
 IMAGE_NAME="safe-claude"
 DEFAULT_INSTALL_DIR="/usr/local/bin"
+VERSION_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/safe-claude/version"
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -97,6 +98,19 @@ else
 fi
 
 success "'safe-claude' installed to '${DEST}'."
+
+# ── step 3b: record installed version ─────────────────────────────────────────
+# Store the source commit SHA so 'safe-claude update' can detect "already up to
+# date" and 'safe-claude --version' can report it. Written to the user's config
+# dir (never needs sudo).
+mkdir -p "$(dirname "$VERSION_FILE")"
+if SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null); then
+  printf '%s\n' "$SHA" > "$VERSION_FILE"
+  success "Recorded version ${SHA:0:8}."
+else
+  printf '%s\n' "unknown" > "$VERSION_FILE"
+  warn "Not a git checkout — recorded version as 'unknown'."
+fi
 
 # ── step 4: verify ───────────────────────────────────────────────────────────
 
