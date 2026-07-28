@@ -120,7 +120,7 @@ if ($LASTEXITCODE -eq 0 -and $sha) {
     Write-Success "Recorded version $($sha.Trim().Substring(0,8))."
 } else {
     Set-Content -Path $VERSION_FILE -Value "unknown"
-    Write-Warn "Not a git checkout — recorded version as 'unknown'."
+    Write-Warn "Not a git checkout - recorded version as 'unknown'."
 }
 
 # ── step 5: add to PATH ───────────────────────────────────────────────────────
