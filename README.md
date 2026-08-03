@@ -151,6 +151,13 @@ safe-claude rebuild /path/to/your/project      # add -y to skip the confirmation
 
 `rebuild` recreates that one sandbox on the new image. Your Claude login and session history are preserved (they live on the `-claude` volume), and your project files are never touched. It also saves a backup image of the old container (`safe-claude-backup-<folder>-<timestamp>`) as a safety net. **Note:** system packages you installed *inside* the container (via `apt`/`pip`) are not carried over automatically — reinstall them, or recover them from the backup image (`docker run --rm -it <backup_image> bash`).
 
+If that backup **cannot** be made, `rebuild` stops instead of continuing. Recreating the container destroys anything installed inside it, and without the backup there is no way to get it back. Docker occasionally fails here with `NotFound: content digest ...: not found`, which means its image store no longer holds all the layers the container was built from. Your options:
+
+- Take your own copy first — `docker export <container> -o backup.tar` writes a flat filesystem tar and does not depend on the image store. Expect it to be large.
+- Rebuild without a backup, if there is nothing inside the container worth keeping: `safe-claude rebuild <path> --no-backup`.
+
+Either way your project files and your Claude login/history are unaffected.
+
 ### Migrating a sandbox created before the persistent volume
 
 If a sandbox predates the per-folder `.claude` volume, `rebuild` migrates it for you. Before recreating the container it copies `/home/node/.claude` out of the old one, creates the `<container_name>-claude` volume, and seeds it with that data — so you stay logged in and keep your session history, and from then on the sandbox can be recreated freely without losing either.
