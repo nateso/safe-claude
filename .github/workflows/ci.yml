@@ -11,7 +11,7 @@ jobs:
     name: bash (ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Syntax check
         run: bash -n safe-claude install.sh
@@ -68,7 +68,7 @@ jobs:
     name: powershell (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Syntax check
         shell: pwsh
