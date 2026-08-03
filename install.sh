@@ -52,9 +52,23 @@ fi
 
 echo ""
 if docker image inspect "$IMAGE_NAME" &>/dev/null; then
-  warn "Docker image '${IMAGE_NAME}' already exists."
-  read -rp "         Rebuild it? [y/N] " REBUILD
-  REBUILD="${REBUILD:-N}"
+  # Compare the image's stamped commit with this checkout. An image built from
+  # different source is the common cause of "I reinstalled but nothing changed",
+  # so recommend rebuilding in that case rather than defaulting to skip.
+  IMG_SHA="$(docker image inspect "$IMAGE_NAME" \
+      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  if [[ -z "$IMG_SHA" || "$IMG_SHA" == "<no value>" ]]; then IMG_SHA="unknown"; fi
+
+  if [[ "$SHA" != "unknown" && "$IMG_SHA" == "$SHA" ]]; then
+    warn "Docker image '${IMAGE_NAME}' already exists and matches this checkout (${SHA:0:8})."
+    read -rp "         Rebuild it anyway? [y/N] " REBUILD
+    REBUILD="${REBUILD:-N}"
+  else
+    warn "Docker image '${IMAGE_NAME}' exists but was built from ${IMG_SHA:0:8}, not this checkout (${SHA:0:8})."
+    warn "Rebuilding keeps the image in step with the command being installed."
+    read -rp "         Rebuild it? [Y/n] " REBUILD
+    REBUILD="${REBUILD:-Y}"
+  fi
 else
   REBUILD="y"
 fi

@@ -49,13 +49,43 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Success "Docker is available and running."
 
+# Resolve the source commit up front: it is stamped into the image below and
+# recorded for 'safe-claude --version' further down.
+$sha = (git -C $ScriptDir rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $sha) { $sha = 'unknown' } else { $sha = $sha.Trim() }
+
 # ── step 2: build the Docker image ───────────────────────────────────────────
 
 Write-Host ""
-$null = docker image inspect $IMAGE_NAME 2>&1
-if ($LASTEXITCODE -eq 0) {
-    Write-Warn "Docker image '$IMAGE_NAME' already exists."
-    $rebuild = Read-Host "         Rebuild it? [y/N]"
+$imgJson = docker image inspect $IMAGE_NAME 2>$null
+if ($LASTEXITCODE -eq 0 -and $imgJson) {
+    # Compare the image's stamped commit with this checkout. An image built from
+    # different source is the common cause of "I reinstalled but nothing
+    # changed", so recommend rebuilding rather than defaulting to skip.
+    $imgSha = 'unknown'
+    try {
+        $labels = (@($imgJson | ConvertFrom-Json)[0]).Config.Labels
+        if ($labels) {
+            $prop = $labels.PSObject.Properties['org.opencontainers.image.revision']
+            if ($prop -and $prop.Value) { $imgSha = [string]$prop.Value }
+        }
+    } catch {
+        # Unparseable inspect output: treat the image as carrying no stamp.
+        $imgSha = 'unknown'
+    }
+
+    if ($sha -ne 'unknown' -and $imgSha -eq $sha) {
+        Write-Warn "Docker image '$IMAGE_NAME' already exists and matches this checkout ($($sha.Substring(0,8)))."
+        $rebuild = Read-Host "         Rebuild it anyway? [y/N]"
+        if ([string]::IsNullOrWhiteSpace($rebuild)) { $rebuild = 'N' }
+    } else {
+        $shortImg = if ($imgSha.Length -ge 8) { $imgSha.Substring(0,8) } else { $imgSha }
+        $shortSrc = if ($sha.Length -ge 8) { $sha.Substring(0,8) } else { $sha }
+        Write-Warn "Docker image '$IMAGE_NAME' exists but was built from $shortImg, not this checkout ($shortSrc)."
+        Write-Warn "Rebuilding keeps the image in step with the command being installed."
+        $rebuild = Read-Host "         Rebuild it? [Y/n]"
+        if ([string]::IsNullOrWhiteSpace($rebuild)) { $rebuild = 'Y' }
+    }
 } else {
     $rebuild = "y"
 }
@@ -64,7 +94,7 @@ if ($rebuild -match '^[Yy]$') {
     Write-Info "Building Docker image '$IMAGE_NAME' (this may take a few minutes)..."
     # --pull so a rebuild actually refreshes the base image rather than reusing a
     # stale local copy.
-    docker build --pull -t $IMAGE_NAME $ScriptDir
+    docker build --pull --build-arg "SAFE_CLAUDE_VERSION=$sha" -t $IMAGE_NAME $ScriptDir
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Docker build failed. Check the output above for details."
     }
@@ -116,13 +146,11 @@ Write-Success "Files installed."
 # date" and 'safe-claude --version' can report it.
 $verDir = Split-Path -Parent $VERSION_FILE
 if (-not (Test-Path $verDir)) { New-Item -ItemType Directory -Path $verDir -Force | Out-Null }
-$sha = (git -C $ScriptDir rev-parse HEAD 2>$null)
-if ($LASTEXITCODE -eq 0 -and $sha) {
-    Set-Content -Path $VERSION_FILE -Value $sha.Trim()
-    Write-Success "Recorded version $($sha.Trim().Substring(0,8))."
-} else {
-    Set-Content -Path $VERSION_FILE -Value "unknown"
+Set-Content -Path $VERSION_FILE -Value $sha
+if ($sha -eq 'unknown') {
     Write-Warn "Not a git checkout - recorded version as 'unknown'."
+} else {
+    Write-Success "Recorded version $($sha.Substring(0,8))."
 }
 
 # ── step 5: add to PATH ───────────────────────────────────────────────────────

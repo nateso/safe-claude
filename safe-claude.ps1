@@ -346,8 +346,12 @@ function Invoke-List {
 
     $imageInfo = Invoke-DockerInspect -Names @($IMAGE_NAME) -Image
     $currentId = if ($imageInfo) { $imageInfo[0].Id } else { $null }
+    $currentVer = ''
     if (-not $currentId) {
         Write-Warn "The '$IMAGE_NAME' image is not built, so sandboxes cannot be compared against it."
+    } else {
+        $currentVer = Get-LabelValue -Labels $imageInfo[0].Config.Labels -Name 'org.opencontainers.image.revision'
+        if ($currentVer -eq 'unknown') { $currentVer = '' }
     }
 
     # One inspect call for every sandbox, rather than one per sandbox.
@@ -371,6 +375,10 @@ function Invoke-List {
         elseif ($img -eq $currentId){ $image = 'current' }
         else                        { $image = 'outdated'; $stale++ }
         $ver = Get-LabelOr -Value $lVer -Fallback ''
+        if ($ver -eq 'unknown') { $ver = '' }
+        # A sandbox running the current image is, by definition, that image's
+        # version -- so fill it in for containers created before version stamping.
+        if (-not $ver -and $currentId -and $img -eq $currentId) { $ver = $currentVer }
         if ($ver) { $image = "$image ($($ver.Substring(0, [Math]::Min(8, $ver.Length))))" }
 
         $vol = Get-LabelOr -Value $vol -Fallback ''
@@ -410,6 +418,14 @@ function Invoke-List {
     if ($stale)    { $summary += "  $stale on an older image." }
     if ($noVolume) { $summary += "  $noVolume without a persistent .claude volume." }
     Write-Host $summary
+
+    if ($currentId -and -not $currentVer) {
+        Write-Host ""
+        Write-Host "  The '$IMAGE_NAME' image carries no version stamp, so the commit a"
+        Write-Host "  sandbox runs cannot be shown. Rebuild the image to enable it:"
+        Write-Host "      safe-claude update --force"
+        Write-Host "  (or re-run the installer and say yes when it offers to rebuild)."
+    }
 
     if ($suggest) {
         Write-Host ""

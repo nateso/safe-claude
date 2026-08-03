@@ -239,10 +239,13 @@ cmd_list() {
     return 0
   fi
 
-  local current_id
+  local current_id current_ver=""
   current_id="$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}' 2>/dev/null || true)"
   if [[ -z "$current_id" ]]; then
     warn "The '${IMAGE_NAME}' image is not built, so sandboxes cannot be compared against it."
+  else
+    current_ver="$(image_version)"
+    if [[ "$current_ver" == "unknown" ]]; then current_ver=""; fi
   fi
 
   # One inspect call for every sandbox, rather than one per sandbox.
@@ -272,6 +275,12 @@ cmd_list() {
       stale=$((stale + 1))
     fi
     ver="$(label_or "$lver" "")"
+    if [[ "$ver" == "unknown" ]]; then ver=""; fi
+    # A sandbox running the current image is, by definition, that image's
+    # version -- so fill it in for containers created before version stamping.
+    if [[ -z "$ver" && -n "$current_id" && "$img" == "$current_id" ]]; then
+      ver="$current_ver"
+    fi
     if [[ -n "$ver" ]]; then
       image_col="${image_col} (${ver:0:8})"
     fi
@@ -315,6 +324,14 @@ cmd_list() {
   [[ "$stale"    -eq 0 ]] || printf '  %d on an older image.' "$stale"
   [[ "$novolume" -eq 0 ]] || printf '  %d without a persistent .claude volume.' "$novolume"
   printf '\n'
+
+  if [[ -n "$current_id" && -z "$current_ver" ]]; then
+    echo ""
+    echo "  The '${IMAGE_NAME}' image carries no version stamp, so the commit a"
+    echo "  sandbox runs cannot be shown. Rebuild the image to enable it:"
+    echo "      safe-claude update --force"
+    echo "  (or re-run the installer and say yes when it offers to rebuild)."
+  fi
 
   if [[ ${#suggest[@]} -gt 0 ]]; then
     echo ""
