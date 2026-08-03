@@ -5,7 +5,7 @@ set -euo pipefail
 # safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox
 # safe-claude update [-y] [--force]               Update tool + image to latest
 # safe-claude list                                Show every sandbox and its state
-# safe-claude rebuild <path> [-y] [--no-backup]    Rebuild one sandbox on new image
+# safe-claude rebuild <path_to_folder> [-y]        Rebuild one sandbox on new image
 # safe-claude --version                            Show installed version
 #
 # Enter (or create) a Docker container that mounts the given folder as
@@ -24,7 +24,6 @@ usage() {
   echo "  safe-claude update [-y] [--force]               Update the tool + image to latest main"
   echo "  safe-claude list                                Show every sandbox and its state"
   echo "  safe-claude rebuild <path_to_folder> [-y]       Move an existing sandbox onto the new image"
-  echo "                                                  (--no-backup: proceed if the backup fails)"
   echo "  safe-claude --version                           Print the installed version"
   echo ""
   echo "  Entering a folder creates its container if it does not exist yet and"
@@ -346,18 +345,17 @@ cmd_list() {
 # ── rebuild (opt-in per-sandbox migration onto the new image) ────────────────
 
 cmd_rebuild() {
-  local assume_yes=0 no_backup=0 patharg=""
+  local assume_yes=0 patharg=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -y|--yes)    assume_yes=1; shift ;;
-      --no-backup) no_backup=1;  shift ;;
+      -y|--yes) assume_yes=1; shift ;;
       -*) err "Unknown option for 'rebuild': $1" ;;
       *)  [[ -z "$patharg" ]] \
             || err "'rebuild' takes a single folder; unexpected extra argument: $1"
           patharg="$1"; shift ;;
     esac
   done
-  [[ -n "$patharg" ]] || err "Usage: safe-claude rebuild <path_to_folder> [-y] [--no-backup]"
+  [[ -n "$patharg" ]] || err "Usage: safe-claude rebuild <path_to_folder> [-y]"
 
   require_docker
   require_image
@@ -380,8 +378,7 @@ cmd_rebuild() {
   echo "  This recreates the sandbox on the current '${IMAGE_NAME}' image."
   echo "  Claude login/history is preserved via a Docker volume."
   echo "  System packages installed inside the container (apt/pip) are NOT carried over"
-  echo "  (a backup image of the old container is made so you can recover them; if"
-  echo "  that backup cannot be made, the rebuild stops rather than proceeding)."
+  echo "  (a backup image of the old container is made, when Docker allows it)."
   echo ""
   if [[ "$assume_yes" -ne 1 ]]; then
     confirm "Rebuild this sandbox?" || { echo "Rebuild cancelled."; return 0; }
@@ -426,9 +423,9 @@ cmd_rebuild() {
     volume="$uses_volume"
   fi
 
-  # Safety backup of the whole old container (captures apt/pip installs too).
-  # This is the only copy of anything installed inside the container, so a
-  # failure here must not be shrugged off: the next step destroys the original.
+  # Best-effort safety backup of the old container. The container is disposable
+  # by design -- project files live on the host, Claude's login/history on the
+  # volume -- so a failed backup is reported but does not stop the rebuild.
   local ts base backup backup_ok=1 commit_err=""
   ts="$(date +%Y%m%d-%H%M%S)"
   base="$(basename "$abs" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
@@ -442,27 +439,10 @@ cmd_rebuild() {
   fi
 
   if [[ "$backup_ok" -eq 0 ]]; then
-    warn "Could not create the backup image."
+    warn "Could not create the backup image; continuing without one."
     if [[ -n "$commit_err" ]]; then echo "  Docker said: ${commit_err}"; fi
-    echo ""
-    echo "  Rebuilding replaces the container. Without a backup, anything you"
-    echo "  installed inside it (apt/pip packages, files outside /workspace) is"
-    echo "  gone for good. Your project files in"
-    echo "      ${abs}"
-    echo "  and your Claude login/history are safe either way."
-    echo ""
-    echo "  To keep your own copy first, in another terminal:"
-    echo "      docker export ${container} -o safe-claude-backup.tar"
-    echo "  That writes a flat filesystem tar — expect it to be large."
-    echo ""
-    if [[ "$no_backup" -eq 1 ]]; then
-      warn "Continuing without a backup (--no-backup was given)."
-    elif [[ "$assume_yes" -eq 1 ]]; then
-      err "Stopping. Re-run with --no-backup to rebuild without one."
-    else
-      confirm "Rebuild anyway, without a backup?" \
-        || { echo "Rebuild cancelled. The sandbox was left as it is."; return 0; }
-    fi
+    echo "  Anything installed inside the old container will not be recoverable."
+    echo "  Your files in ${abs} and your Claude login/history are unaffected."
   fi
 
   info "Removing old container and recreating on the new image..."
