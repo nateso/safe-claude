@@ -139,7 +139,10 @@ cmd_update() {
 
   local tmp
   tmp="$(mktemp -d)"
-  trap "rm -rf '$tmp'" EXIT   # expand $tmp now: it is 'local' and gone by EXIT-trap time
+  # Expand $tmp now rather than at trap time: it is 'local' and out of scope by
+  # the time the EXIT trap fires. This is why the double quotes are deliberate.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
 
   info "Fetching latest from ${REPO_URL} (branch main)..."
   git clone --depth 1 --branch main "$REPO_URL" "$tmp" >/dev/null 2>&1 \
@@ -240,7 +243,10 @@ cmd_rebuild() {
 
   local tmp
   tmp="$(mktemp -d)"
-  trap "rm -rf '$tmp'" EXIT   # expand $tmp now: it is 'local' and gone by EXIT-trap time
+  # Expand $tmp now rather than at trap time: it is 'local' and out of scope by
+  # the time the EXIT trap fires. This is why the double quotes are deliberate.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
 
   # Is /home/node/.claude already backed by a named volume?
   local uses_volume

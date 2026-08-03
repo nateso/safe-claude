@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ── macOS / Linux: the bash script ──────────────────────────────────────────
+  bash:
+    name: bash (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check
+        run: bash -n safe-claude install.sh
+
+      - name: ShellCheck
+        run: |
+          command -v shellcheck >/dev/null || {
+            sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          }
+          shellcheck --severity=style safe-claude install.sh
+
+      # Every case below exits before the Docker pre-flight, so no daemon needed.
+      - name: CLI contract
+        run: |
+          set +e   # cases are expected to exit non-zero; failures are collected below
+          chmod +x ./safe-claude
+          fail=0
+          check() {  # check <description> <expected-exit> <expected-substring> -- <args...>
+            local desc="$1" want_code="$2" want_text="$3"; shift 4
+            local out code
+            out="$(./safe-claude "$@" 2>&1)"; code=$?
+            if [[ "$code" -ne "$want_code" ]]; then
+              printf '  FAIL %s: exit %s, wanted %s\n' "$desc" "$code" "$want_code"; fail=1; return
+            fi
+            if [[ "$out" != *"$want_text"* ]]; then
+              printf '  FAIL %s: output lacked %q\n     got: %s\n' "$desc" "$want_text" "$out"; fail=1; return
+            fi
+            printf '  ok   %s\n' "$desc"
+          }
+
+          check '--version'            0 'safe-claude '               -- --version
+          check '-v'                   0 'safe-claude '               -- -v
+          check '--help'               0 'Usage:'                     -- --help
+          check 'help'                 0 'Usage:'                     -- help
+          check 'no args'              1 'Usage:'                     --
+          check 'missing folder'       1 'Path does not exist'        -- /definitely/not/here
+          check 'rebuild, no path'     1 'Usage: safe-claude rebuild' -- rebuild
+          check 'rebuild, two paths'   1 'unexpected extra argument'  -- rebuild /tmp /etc
+          check 'update, bad flag'     1 'Unknown option'             -- update --bogus
+
+          # --version must never fall through to the usage screen.
+          if ./safe-claude --version 2>&1 | grep -q 'Usage:'; then
+            echo '  FAIL --version printed the usage screen'; fail=1
+          fi
+
+          exit $fail
+
+  # ── Windows: the PowerShell script ──────────────────────────────────────────
+  powershell:
+    name: powershell (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          $bad = $false
+          foreach ($f in 'safe-claude.ps1', 'install.ps1') {
+              $errors = $null
+              $null = [System.Management.Automation.Language.Parser]::ParseFile(
+                  (Resolve-Path $f), [ref]$null, [ref]$errors)
+              if ($errors) {
+                  $bad = $true
+                  $errors | ForEach-Object { Write-Host "  FAIL ${f}:$($_.Extent.StartLineNumber) $($_.Message)" }
+              } else { Write-Host "  ok   $f" }
+          }
+          if ($bad) { exit 1 }
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+          # Write-Host is correct for a console tool; the unapproved verbs
+          # (Require-Docker / Require-Image) and the missing BOM are known and
+          # deliberate. Anything else is a real finding.
+          $skip = 'PSAvoidUsingWriteHost', 'PSUseApprovedVerbs', 'PSUseBOMForUnicodeEncodedFile'
+          $found = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error, Warning -ExcludeRule $skip
+          $compat = Invoke-ScriptAnalyzer -Path . -Recurse -IncludeRule PSUseCompatibleSyntax `
+              -Settings @{ Rules = @{ PSUseCompatibleSyntax = @{ Enable = $true; TargetVersions = @('5.1', '7.0') } } }
+          $all = @($found) + @($compat) | Where-Object { $_ }
+          if ($all) { $all | ForEach-Object { Write-Host "  FAIL $($_.ScriptName):$($_.Line) $($_.RuleName) - $($_.Message)" }; exit 1 }
+          Write-Host '  ok   no findings'
+
+      # Windows PowerShell 5.1 and PowerShell 7 bind '--version'-style tokens
+      # differently, and the .bat wrapper runs 5.1. Both are exercised. Every
+      # case exits before the Docker pre-flight, so no daemon is needed.
+      - name: CLI contract (Windows PowerShell 5.1 and PowerShell 7)
+        shell: pwsh
+        run: |
+          $hosts = [ordered]@{
+              'Windows PowerShell 5.1' = @('powershell.exe', '-ExecutionPolicy', 'Bypass', '-File')
+              'PowerShell 7'           = @('pwsh',           '-NoProfile',       '-File')
+          }
+          $cases = @(
+              @{ Name = '--version';          Args = @('--version');        Code = 0; Want = 'safe-claude '; Avoid = 'Usage:' }
+              @{ Name = '-v';                 Args = @('-v');               Code = 0; Want = 'safe-claude '; Avoid = 'Usage:' }
+              @{ Name = '--help';             Args = @('--help');           Code = 0; Want = 'Usage:' }
+              @{ Name = '-h';                 Args = @('-h');               Code = 0; Want = 'Usage:' }
+              @{ Name = 'help';               Args = @('help');             Code = 0; Want = 'Usage:' }
+              @{ Name = 'no args';            Args = @();                   Code = 1; Want = 'Usage:' }
+              @{ Name = 'missing folder';     Args = @('X:\nope\nope');     Code = 1; Want = 'Path does not exist' }
+              @{ Name = 'rebuild, no path';   Args = @('rebuild');          Code = 1; Want = 'Usage: safe-claude rebuild' }
+              @{ Name = 'rebuild -y';         Args = @('rebuild', '-y');    Code = 1; Want = 'Usage: safe-claude rebuild'; Avoid = 'Unknown option' }
+              @{ Name = 'update, bad flag';   Args = @('update', '--bogus');Code = 1; Want = 'Unknown option' }
+          )
+
+          $fail = $false
+          foreach ($h in $hosts.GetEnumerator()) {
+              Write-Host "--- $($h.Key) ---"
+              $exe, $flags = $h.Value[0], $h.Value[1..($h.Value.Count - 1)]
+              foreach ($c in $cases) {
+                  # Splatting needs a variable, not an expression.
+                  $caseArgs = @($c.Args)
+                  $out  = (& $exe @flags '.\safe-claude.ps1' @caseArgs 2>&1 | Out-String)
+                  $code = $LASTEXITCODE
+                  $problems = @()
+                  if ($code -ne $c.Code)                       { $problems += "exit $code, wanted $($c.Code)" }
+                  if ($out -notlike "*$($c.Want)*")            { $problems += "output lacked '$($c.Want)'" }
+                  if ($c.Avoid -and $out -like "*$($c.Avoid)*"){ $problems += "output contained '$($c.Avoid)'" }
+                  if ($problems) {
+                      $fail = $true
+                      Write-Host "  FAIL $($c.Name): $($problems -join '; ')"
+                      Write-Host "       got: $($out.Trim())"
+                  } else { Write-Host "  ok   $($c.Name)" }
+              }
+          }
+          if ($fail) { exit 1 }
+
+      # A '--version' token can arrive by three different routes depending on the
+      # shell. Each is exercised directly, so the contract is checked even on a
+      # runner whose shell only happens to take one of them.
+      - name: Binder arrangements
+        shell: pwsh
+        run: |
+          $routes = @(
+              @{ Name = 'version as -FolderPath'; Expr = "& './safe-claude.ps1' -FolderPath '--version'"; Want = 'safe-claude ' }
+              @{ Name = 'version as -ClaudeArgs'; Expr = "& './safe-claude.ps1' -ClaudeArgs '--version'"; Want = 'safe-claude ' }
+              @{ Name = 'version as -Version';    Expr = "& './safe-claude.ps1' -Version";                Want = 'safe-claude ' }
+              @{ Name = 'help as -FolderPath';    Expr = "& './safe-claude.ps1' -FolderPath '--help'";    Want = 'Usage:' }
+              @{ Name = 'help as -ClaudeArgs';    Expr = "& './safe-claude.ps1' -ClaudeArgs '--help'";    Want = 'Usage:' }
+              @{ Name = 'help as -Help';          Expr = "& './safe-claude.ps1' -Help";                   Want = 'Usage:' }
+          )
+          $fail = $false
+          foreach ($exe in 'powershell.exe', 'pwsh') {
+              Write-Host "--- $exe ---"
+              foreach ($r in $routes) {
+                  $out = (& $exe -NoProfile -ExecutionPolicy Bypass -Command $r.Expr 2>&1 | Out-String)
+                  if ($out -like "*$($r.Want)*") { Write-Host "  ok   $($r.Name)" }
+                  else {
+                      $fail = $true
+                      Write-Host "  FAIL $($r.Name): wanted '$($r.Want)', got: $($out.Trim())"
+                  }
+              }
+          }
+          if ($fail) { exit 1 }
+
+      - name: Declared parameters
+        shell: pwsh
+        run: |
+          # -y / --force / --version / -v must stay declared parameters: that is
+          # what keeps them working across both shells.
+          $p = (Get-Command .\safe-claude.ps1).Parameters
+          $want = @{ Yes = 'y'; Force = $null; Version = 'v'; Help = 'h' }
+          $fail = $false
+          foreach ($name in $want.Keys) {
+              if (-not $p.ContainsKey($name)) { Write-Host "  FAIL -$name is not declared"; $fail = $true; continue }
+              $alias = $want[$name]
+              if ($alias -and $p[$name].Aliases -notcontains $alias) {
+                  Write-Host "  FAIL -$name lost its '-$alias' alias"; $fail = $true; continue
+              }
+              Write-Host "  ok   -$name"
+          }
+          if ($fail) { exit 1 }
