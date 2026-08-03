@@ -1,5 +1,7 @@
 # Safe Claude
 
+[![CI](https://github.com/nateso/safe-claude/actions/workflows/ci.yml/badge.svg)](https://github.com/nateso/safe-claude/actions/workflows/ci.yml)
+
 Run Claude Code inside an isolated Docker container with access to only one folder on your machine. Claude can only read and write files within that folder — nothing else on your host machine is accessible.
 
 **Why use this?** Claude Code is a powerful autonomous agent that can read, write, and delete files. Running it directly on your machine gives it access to your home directory, credentials, and other sensitive data. This project eliminates that risk by sandboxing Claude inside a container where only a single folder you choose is ever visible.
