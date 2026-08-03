@@ -483,6 +483,7 @@ function Invoke-Rebuild {
 
     $tmp = Join-Path $env:TEMP ("safe-claude-rebuild-" + [System.Guid]::NewGuid().ToString('N'))
     try {
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
         if (-not $usesVolume) {
             Write-Info "Migrating Claude login/history into volume '$volume'..."
             $claudeTmp = Join-Path $tmp "claude"
@@ -499,12 +500,28 @@ function Invoke-Rebuild {
             if ($LASTEXITCODE -ne 0) { docker rm -f $helper 2>&1 | Out-Null; Write-Err "Failed to seed volume '$volume'." }
             # 1000:1000 is the image's built-in 'node' user, which is who Claude
             # runs as inside the container on Docker Desktop.
-            docker exec -u 0 $helper sh -c 'chown -R 1000:1000 /dest' | Out-Null
+            #
+            # chmod: the copy above round-trips the files through NTFS, which
+            # cannot represent Unix modes, so they come back world-readable.
+            # Claude Code refuses to read .credentials.json unless it is 0600.
+            docker exec -u 0 $helper sh -c 'chown -R 1000:1000 /dest && chmod -R go-rwx /dest' | Out-Null
             docker rm -f $helper | Out-Null
             Write-Success "Volume '$volume' seeded from the old container."
         } else {
             Write-Info "Sandbox already uses volume '$usesVolume'; login/history will persist automatically."
             $volume = $usesVolume
+        }
+
+        # .claude.json holds Claude's account state. Images without
+        # CLAUDE_CONFIG_DIR keep it outside .claude/, where the volume does not
+        # reach it, so save it here and put it back after the swap -- otherwise
+        # the rebuild logs you out.
+        $savedConfig = $null
+        $candidate = Join-Path $tmp "claude.json"
+        foreach ($src in @('/home/node/.claude.json', '/home/node/.claude/.claude.json')) {
+            Remove-Item -Force $candidate -ErrorAction SilentlyContinue
+            docker cp "${container}:$src" $candidate 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $candidate)) { $savedConfig = $candidate; break }
         }
 
         # Safety backup of the whole old container (captures apt/pip installs
@@ -521,6 +538,41 @@ function Invoke-Rebuild {
             $commitErr = "docker reported success but the image is not there"
         }
 
+        # 'docker commit' builds on the container's image layers, so it fails when
+        # Docker's content store has lost one ("content digest ...: not found").
+        # 'docker export' reads the live filesystem instead and is unaffected; the
+        # image it produces is flattened but is still a usable backup.
+        #
+        # Via a temp file rather than a pipe: PowerShell pipes carry text, so
+        # 'docker export | docker import' would corrupt the tar.
+        if (-not $backupOk) {
+            Write-Warn "docker commit failed: $commitErr"
+            Write-Info "Falling back to 'docker export', which does not read the image store."
+            Write-Info "This writes a temporary tar of the whole container - expect several GB and a few minutes."
+            $tar = Join-Path $tmp "backup.tar"
+            docker export $container -o $tar 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                # --change restores the settings a flat export drops. None of them
+                # may contain double quotes -- PowerShell mangles native-command
+                # args that do (see Invoke-DockerInspect) -- hence shell-form CMD.
+                docker import `
+                    --change 'ENV HOME=/home/node' `
+                    --change 'ENV CLAUDE_CONFIG_DIR=/home/node/.claude' `
+                    --change 'ENV PATH=/opt/venv/bin:/home/node/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' `
+                    --change 'WORKDIR /workspace' `
+                    --change 'USER node' `
+                    --change 'CMD bash' `
+                    $tar $backup 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0 -and (Invoke-DockerInspect -Names @($backup) -Image)) {
+                    $backupOk = $true
+                    $commitErr = ""
+                    Write-Success "Backup image '$backup' created via docker export."
+                }
+            }
+            Remove-Item -Force $tar -ErrorAction SilentlyContinue
+            if (-not $backupOk) { Write-Warn "'docker export' could not produce a backup either." }
+        }
+
         if (-not $backupOk) {
             Write-Warn "Could not create the backup image."
             if ($commitErr) { Write-Host "  Docker said: $commitErr" }
@@ -534,6 +586,11 @@ function Invoke-Rebuild {
             Write-Host "  To keep your own copy first, in another terminal:"
             Write-Host "      docker export $container -o safe-claude-backup.tar"
             Write-Host "  That writes a flat filesystem tar - expect it to be large."
+            Write-Host ""
+            Write-Host "  A 'content digest ... not found' error is a Docker image-store fault,"
+            Write-Host "  not a problem with this sandbox. It usually clears after restarting"
+            Write-Host "  Docker Desktop, or by turning off Settings > General > 'Use containerd"
+            Write-Host "  for pulling and storing images'."
             Write-Host ""
             if ($noBackup) {
                 Write-Warn "Continuing without a backup (--no-backup was given)."
@@ -549,6 +606,29 @@ function Invoke-Rebuild {
         docker rm -f $container | Out-Null
         docker run -dit --name $container --label "safe-claude.path=$abs" --label "safe-claude.version=$(Get-ImageVersion)" -v "${abs}:/workspace" -v "${volume}:/home/node/.claude" $IMAGE_NAME | Out-Null
         if ($LASTEXITCODE -ne 0) { Write-Err "Failed to recreate container. Your files are safe in $abs; backup image: $backup." }
+
+        # Where .claude.json belongs depends on the new image: on the volume if it
+        # sets CLAUDE_CONFIG_DIR, in $HOME otherwise. Read that from the inspect
+        # JSON rather than an 'sh -c' probe, which would need double quotes.
+        if ($savedConfig) {
+            $cfgDir = '/home/node'
+            $newInfo = Invoke-DockerInspect -Names @($container)
+            if ($newInfo) {
+                $envVar = @($newInfo[0].Config.Env) | Where-Object { $_ -like 'CLAUDE_CONFIG_DIR=*' } | Select-Object -First 1
+                if ($envVar) { $cfgDir = $envVar.Substring('CLAUDE_CONFIG_DIR='.Length) }
+            }
+            docker exec $container sh -c "[ -s '$cfgDir/.claude.json' ]" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                # The volume carries no copy, so restore the one we saved.
+                docker cp $savedConfig "${container}:$cfgDir/.claude.json" 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    docker exec -u 0 $container sh -c "chown 1000:1000 '$cfgDir/.claude.json' && chmod 600 '$cfgDir/.claude.json'" 2>&1 | Out-Null
+                    Write-Success "Carried your Claude account state (.claude.json) into the new sandbox."
+                } else {
+                    Write-Warn "Could not carry .claude.json over - you may have to log in again."
+                }
+            }
+        }
 
         Write-Success "Sandbox rebuilt on the '$IMAGE_NAME' image."
         if ($backupOk) {

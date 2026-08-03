@@ -32,6 +32,10 @@ WORKDIR /workspace
 # and it also stops Claude from leaving root-owned files in the mounted folder.
 RUN mkdir -p /home/node/.claude && chown -R node:node /home/node
 ENV HOME=/home/node
+# Claude writes its account state to ~/.claude.json, which sits *outside* the
+# ~/.claude directory that safe-claude backs with a volume. Point it inside, or
+# recreating the container drops you back into onboarding.
+ENV CLAUDE_CONFIG_DIR=/home/node/.claude
 # Anthropic's native installer puts claude in ~/.local/bin, so add it to PATH.
 ENV PATH="/home/node/.local/bin:$PATH"
 USER node

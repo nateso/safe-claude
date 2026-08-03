@@ -418,13 +418,28 @@ cmd_rebuild() {
     # on macOS/Windows. On Linux, entering the sandbox re-chowns /home/node to
     # your host UID/GID (see the RUN_USER block below), so this is just a sane
     # starting point rather than the final ownership.
-    docker exec -u 0 "$helper" sh -c 'chown -R 1000:1000 /dest' || true
+    #
+    # chmod: the copy above round-trips through the host, and a filesystem that
+    # cannot represent Unix modes (Windows) hands the files back world-readable.
+    # Claude Code refuses to read .credentials.json unless it is 0600.
+    docker exec -u 0 "$helper" sh -c 'chown -R 1000:1000 /dest && chmod -R go-rwx /dest' || true
     docker rm -f "$helper" >/dev/null
     success "Volume '${volume}' seeded from the old container."
   else
     info "Sandbox already uses volume '${uses_volume}'; login/history will persist automatically."
     volume="$uses_volume"
   fi
+
+  # .claude.json holds Claude's account state. Images without CLAUDE_CONFIG_DIR
+  # keep it outside .claude/, where the volume does not reach it, so save it here
+  # and put it back after the swap -- otherwise the rebuild logs you out.
+  local saved_config="" src
+  for src in /home/node/.claude.json /home/node/.claude/.claude.json; do
+    if docker cp "${container}:${src}" "$tmp/claude.json" &>/dev/null; then
+      saved_config="$tmp/claude.json"
+      break
+    fi
+  done
 
   # Safety backup of the whole old container (captures apt/pip installs too).
   # This is the only copy of anything installed inside the container, so a
@@ -441,6 +456,34 @@ cmd_rebuild() {
     commit_err="docker reported success but the image is not there"
   fi
 
+  # 'docker commit' builds on the container's image layers, so it fails when
+  # Docker's content store has lost one ("content digest ...: not found").
+  # 'docker export' reads the live filesystem instead and is unaffected; the
+  # image it produces is flattened but is still a usable backup.
+  if [[ "$backup_ok" -eq 0 ]]; then
+    warn "docker commit failed: ${commit_err}"
+    info "Falling back to 'docker export', which does not read the image store..."
+    # Piped, so no temporary disk space. --change restores the settings a flat
+    # export drops. CMD stays in shell form so the .ps1 can pass the same
+    # argument: PowerShell mangles native-command args containing double quotes.
+    if docker export "$container" \
+         | docker import \
+             --change 'ENV HOME=/home/node' \
+             --change 'ENV CLAUDE_CONFIG_DIR=/home/node/.claude' \
+             --change 'ENV PATH=/opt/venv/bin:/home/node/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+             --change 'WORKDIR /workspace' \
+             --change 'USER node' \
+             --change 'CMD bash' \
+             - "$backup" >/dev/null 2>&1 \
+       && docker image inspect "$backup" &>/dev/null; then
+      backup_ok=1
+      commit_err=""
+      success "Backup image '${backup}' created via docker export."
+    else
+      warn "'docker export' could not produce a backup either."
+    fi
+  fi
+
   if [[ "$backup_ok" -eq 0 ]]; then
     warn "Could not create the backup image."
     if [[ -n "$commit_err" ]]; then echo "  Docker said: ${commit_err}"; fi
@@ -454,6 +497,11 @@ cmd_rebuild() {
     echo "  To keep your own copy first, in another terminal:"
     echo "      docker export ${container} -o safe-claude-backup.tar"
     echo "  That writes a flat filesystem tar — expect it to be large."
+    echo ""
+    echo "  A 'content digest ... not found' error is a Docker image-store fault,"
+    echo "  not a problem with this sandbox. It usually clears after restarting"
+    echo "  Docker Desktop, or by turning off Settings > General > 'Use containerd"
+    echo "  for pulling and storing images'."
     echo ""
     if [[ "$no_backup" -eq 1 ]]; then
       warn "Continuing without a backup (--no-backup was given)."
@@ -479,6 +527,26 @@ cmd_rebuild() {
     -v "${volume}:/home/node/.claude" \
     "$IMAGE_NAME" >/dev/null \
     || err "Failed to recreate container. ${recreate_note}"
+
+  # Where .claude.json belongs depends on the new image: on the volume if it sets
+  # CLAUDE_CONFIG_DIR, in $HOME otherwise. Ask it rather than assume.
+  if [[ -n "$saved_config" ]]; then
+    # '|| true' so pipefail cannot abort the rebuild one step after the container
+    # was recreated.
+    local cfg_dir
+    cfg_dir="$( { docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null \
+                  || true; } | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n 1)"
+    [[ -n "$cfg_dir" ]] || cfg_dir="/home/node"
+    if docker exec "$container" sh -c "[ -s '${cfg_dir}/.claude.json' ]" &>/dev/null; then
+      : # the volume already carries a copy — leave the newer one alone
+    elif docker cp "$saved_config" "${container}:${cfg_dir}/.claude.json" &>/dev/null; then
+      docker exec -u 0 "$container" sh -c \
+        "chown 1000:1000 '${cfg_dir}/.claude.json' && chmod 600 '${cfg_dir}/.claude.json'" &>/dev/null || true
+      success "Carried your Claude account state (.claude.json) into the new sandbox."
+    else
+      warn "Could not carry .claude.json over — you may have to log in again."
+    fi
+  fi
 
   success "Sandbox rebuilt on the '${IMAGE_NAME}' image."
   if [[ "$backup_ok" -eq 1 ]]; then

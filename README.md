@@ -48,7 +48,14 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 The installer will:
 - Check that Docker is running
 - Build the `safe-claude` Docker image (takes a few minutes the first time)
-- Install the `safe-claude` command to a directory on your PATH
+- Install the `safe-claude` command and put it on your PATH
+
+It picks the install location for you (`/usr/local/bin` on macOS/Linux, `%LOCALAPPDATA%\Programs\safe-claude` on Windows) and creates it if needed. To choose your own:
+
+```bash
+./install.sh --install-dir ~/.local/bin                                    # macOS / Linux
+powershell -ExecutionPolicy Bypass -File install.ps1 -InstallDir D:\tools  # Windows
+```
 
 ### 4. Use it
 **macOS / Linux:**
@@ -128,13 +135,7 @@ Anything needing attention is printed with the exact `rebuild` command to fix it
 
 To upgrade `safe-claude` to the latest version on `main`:
 
-**macOS / Linux:**
 ```bash
-safe-claude update
-```
-
-**Windows:**
-```powershell
 safe-claude update
 ```
 
@@ -149,31 +150,32 @@ New sandboxes you create after updating automatically use the new image. **Exist
 safe-claude rebuild /path/to/your/project      # add -y to skip the confirmation
 ```
 
-`rebuild` recreates that one sandbox on the new image. Your Claude login and session history are preserved (they live on the `-claude` volume), and your project files are never touched. It also saves a backup image of the old container (`safe-claude-backup-<folder>-<timestamp>`) as a safety net. **Note:** system packages you installed *inside* the container (via `apt`/`pip`) are not carried over automatically — reinstall them, or recover them from the backup image (`docker run --rm -it <backup_image> bash`).
+`rebuild` recreates that one sandbox on the new image. Your project files are never touched, and your Claude login and session history come across with it. This is the one step `safe-claude update` cannot do for you, because it means replacing the container — run it once per sandbox after your first update.
 
-If that backup **cannot** be made, `rebuild` stops instead of continuing. Recreating the container destroys anything installed inside it, and without the backup there is no way to get it back. Docker occasionally fails here with `NotFound: content digest ...: not found`, which means its image store no longer holds all the layers the container was built from. Your options:
-
-- Take your own copy first — `docker export <container> -o backup.tar` writes a flat filesystem tar and does not depend on the image store. Expect it to be large.
-- Rebuild without a backup, if there is nothing inside the container worth keeping: `safe-claude rebuild <path> --no-backup`.
-
-Either way your project files and your Claude login/history are unaffected.
-
-### Migrating a sandbox created before the persistent volume
-
-If a sandbox predates the per-folder `.claude` volume, `rebuild` migrates it for you. Before recreating the container it copies `/home/node/.claude` out of the old one, creates the `<container_name>-claude` volume, and seeds it with that data — so you stay logged in and keep your session history, and from then on the sandbox can be recreated freely without losing either.
-
-This is the one step `safe-claude update` cannot do on your behalf, because it means replacing the container. Run it once per existing sandbox after your first update.
-
-Check your installed version any time with:
+Before replacing the container, `rebuild` saves a backup image of it (`safe-claude-backup-<folder>-<timestamp>`) as a safety net. **Note:** system packages you installed *inside* the container (via `apt`/`pip`) are not carried over automatically — reinstall them, or recover them from the backup image:
 
 ```bash
-safe-claude --version
+docker run --rm -it <backup_image> bash    # look around the old container
+docker rmi <backup_image>                  # delete it once you are done
 ```
 
-For the full list of subcommands and flags:
+### If the backup fails
+
+Docker occasionally cannot make that backup and reports `NotFound: content digest ...: not found`. This is a fault in Docker's own image store, not a problem with your sandbox — `rebuild` works around it automatically and carries on.
+
+If the workaround fails too, `rebuild` stops rather than destroy a container it cannot back up. Either:
+
+- Restart Docker Desktop, or turn off **Settings → General → "Use containerd for pulling and storing images"**, then try again.
+- Rebuild without a backup, if there is nothing inside the container worth keeping: `safe-claude rebuild <path> --no-backup`.
+
+Your project files and your Claude login are unaffected either way.
+
+
+## Checking your version
 
 ```bash
-safe-claude help
+safe-claude --version      # the commit you have installed
+safe-claude help           # every subcommand and flag
 ```
 
 
@@ -213,6 +215,6 @@ To exit the container, type `exit` or press `Ctrl+D`.
 
 - Node.js 20
 - Claude Code
-- Python 3 + Conda (Miniconda)
+- Python 3, in a virtualenv at `/opt/venv` that `python` and `pip` resolve to
 - R
-- Common build tools
+- Common build tools (needed to compile R and Python native packages)

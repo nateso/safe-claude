@@ -7,6 +7,8 @@ set -euo pipefail
 # 1. Checks prerequisites (Docker)
 # 2. Builds the 'safe-claude' Docker image
 # 3. Installs the 'safe-claude' script to a directory on your PATH
+#
+# Usage: ./install.sh [--install-dir <path>]
 # ---------------------------------------------------------------------------
 
 IMAGE_NAME="safe-claude"
@@ -22,6 +24,32 @@ err()     { echo "[safe-claude] Error: $*" >&2; exit 1; }
 
 # Resolve the directory that contains this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── options ─────────────────────────────────────────────────────────────────
+
+INSTALL_DIR="${INSTALL_DIR:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --install-dir)   INSTALL_DIR="${2:-}"; [[ -n "$INSTALL_DIR" ]] || err "--install-dir needs a path"; shift 2 ;;
+    --install-dir=*) INSTALL_DIR="${1#*=}"; shift ;;
+    -h|--help)
+      echo "Usage: ./install.sh [--install-dir <path>]"
+      echo ""
+      echo "  --install-dir <path>  Where to put the 'safe-claude' command."
+      echo "                        Default: ${DEFAULT_INSTALL_DIR}"
+      exit 0
+      ;;
+    *) err "Unknown option: $1 (try --help)" ;;
+  esac
+done
+
+USING_DEFAULT=0
+if [[ -z "$INSTALL_DIR" ]]; then
+  INSTALL_DIR="$DEFAULT_INSTALL_DIR"
+  USING_DEFAULT=1
+fi
+INSTALL_DIR="${INSTALL_DIR%/}"
 
 # ── step 1: prerequisites ───────────────────────────────────────────────────
 
@@ -86,28 +114,20 @@ fi
 # ── step 3: install the safe-claude script ───────────────────────────────────
 
 echo ""
-info "Where should the 'safe-claude' command be installed?"
-info "It must be a directory on your PATH."
-read -rp "         Install directory [${DEFAULT_INSTALL_DIR}]: " INSTALL_DIR
-INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
-
-# Strip trailing slash
-INSTALL_DIR="${INSTALL_DIR%/}"
+info "Installing the 'safe-claude' command to:"
+echo "               ${INSTALL_DIR}"
+if [[ "$USING_DEFAULT" -eq 1 ]]; then
+  echo "             (to put it somewhere else, re-run with:  --install-dir <path>)"
+fi
 
 if [[ ! -d "$INSTALL_DIR" ]]; then
-  read -rp "         Directory '${INSTALL_DIR}' does not exist. Create it? [y/N] " CREATE_DIR
-  CREATE_DIR="${CREATE_DIR:-N}"
-  if [[ "$CREATE_DIR" =~ ^[Yy]$ ]]; then
-    mkdir -p "$INSTALL_DIR"
-    success "Created directory '${INSTALL_DIR}'."
-  else
-    err "Installation cancelled."
-  fi
+  mkdir -p "$INSTALL_DIR" 2>/dev/null \
+    || sudo mkdir -p "$INSTALL_DIR" \
+    || err "Could not create '${INSTALL_DIR}'."
+  success "Created directory '${INSTALL_DIR}'."
 fi
 
 DEST="${INSTALL_DIR}/safe-claude"
-
-info "Installing to '${DEST}'..."
 
 # Use sudo only when necessary
 if [[ -w "$INSTALL_DIR" ]]; then

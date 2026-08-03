@@ -8,6 +8,10 @@
     3. Installs safe-claude.ps1 and a safe-claude.bat wrapper to a chosen directory
     4. Adds that directory to your user PATH
 
+.PARAMETER InstallDir
+    Where to put the 'safe-claude' command. Defaults to a per-user location that
+    needs no administrator rights. The installer creates it and adds it to PATH.
+
 .NOTES
     If PowerShell blocks this script due to execution policy, run:
         Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
@@ -15,8 +19,12 @@
         powershell -ExecutionPolicy Bypass -File install.ps1
 #>
 
+param(
+    [string]$InstallDir
+)
+
 $IMAGE_NAME   = "safe-claude"
-$DEFAULT_DIR  = "$env:USERPROFILE\AppData\Local\Programs\safe-claude"
+$DEFAULT_DIR  = Join-Path $env:LOCALAPPDATA "Programs\safe-claude"
 $VERSION_FILE = Join-Path $env:LOCALAPPDATA "safe-claude\version"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -103,33 +111,31 @@ if ($rebuild -match '^[Yy]$') {
     Write-Info "Skipping image build."
 }
 
-# ── step 3: choose install directory ─────────────────────────────────────────
+# ── step 3: install directory ────────────────────────────────────────────────
+
+# PowerShell variable names are case-insensitive, so this must NOT be called
+# $installDir: that is the -InstallDir parameter, and assigning the default to it
+# would discard the caller's choice.
+$usingDefault = [string]::IsNullOrWhiteSpace($InstallDir)
+if ($usingDefault) { $targetDir = $DEFAULT_DIR } else { $targetDir = $InstallDir }
+$targetDir = $targetDir.TrimEnd('\').TrimEnd('/')
 
 Write-Host ""
-Write-Info "Where should the 'safe-claude' command be installed?"
-Write-Info "This directory will be added to your user PATH."
-$installDir = Read-Host "         Install directory [$DEFAULT_DIR]"
-if ([string]::IsNullOrWhiteSpace($installDir)) {
-    $installDir = $DEFAULT_DIR
+Write-Info "Installing the 'safe-claude' command to:"
+Write-Host "               $targetDir"
+if ($usingDefault) {
+    Write-Host "             (to put it somewhere else, re-run with:  -InstallDir <path>)"
 }
-$installDir = $installDir.TrimEnd('\').TrimEnd('/')
 
-if (-not (Test-Path $installDir)) {
-    $create = Read-Host "         Directory '$installDir' does not exist. Create it? [y/N]"
-    if ($create -match '^[Yy]$') {
-        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-        Write-Success "Created directory '$installDir'."
-    } else {
-        Write-Err "Installation cancelled."
-    }
+if (-not (Test-Path $targetDir)) {
+    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    Write-Success "Created directory '$targetDir'."
 }
 
 # ── step 4: copy files ────────────────────────────────────────────────────────
 
-$destPs1 = Join-Path $installDir "safe-claude.ps1"
-$destBat = Join-Path $installDir "safe-claude.bat"
-
-Write-Info "Installing to '$installDir'..."
+$destPs1 = Join-Path $targetDir "safe-claude.ps1"
+$destBat = Join-Path $targetDir "safe-claude.bat"
 
 Copy-Item -Path (Join-Path $ScriptDir "safe-claude.ps1") -Destination $destPs1 -Force
 
@@ -156,22 +162,22 @@ if ($sha -eq 'unknown') {
 # ── step 5: add to PATH ───────────────────────────────────────────────────────
 
 $currentPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-if ($currentPath -notlike "*$installDir*") {
-    [System.Environment]::SetEnvironmentVariable("PATH", "$currentPath;$installDir", "User")
-    Write-Success "Added '$installDir' to your user PATH."
+if ($currentPath -notlike "*$targetDir*") {
+    [System.Environment]::SetEnvironmentVariable("PATH", "$currentPath;$targetDir", "User")
+    Write-Success "Added '$targetDir' to your user PATH."
     Write-Warn "Restart your terminal for the PATH change to take effect."
 } else {
-    Write-Info "'$installDir' is already on your PATH."
+    Write-Info "'$targetDir' is already on your PATH."
 }
 
 # ── step 6: verify ────────────────────────────────────────────────────────────
 
 Write-Host ""
 $refreshedPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-if ($refreshedPath -like "*$installDir*") {
+if ($refreshedPath -like "*$targetDir*") {
     Write-Success "Installation complete."
 } else {
-    Write-Warn "Could not verify PATH. You may need to add '$installDir' manually."
+    Write-Warn "Could not verify PATH. You may need to add '$targetDir' manually."
 }
 
 # ── done ──────────────────────────────────────────────────────────────────────
