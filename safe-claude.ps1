@@ -39,6 +39,11 @@ param(
 
     [switch]$Force,
 
+    # No alias: PowerShell matches aliases case-insensitively, so 'nobackup'
+    # would collide with the parameter's own name. '--no-backup' is accepted as
+    # a plain string by the subcommand instead.
+    [switch]$NoBackup,
+
     # Likewise for the version/help flags, which were previously matched against
     # $FolderPath and therefore never fired: PowerShell binds '--version' to a
     # parameter rather than passing it positionally, and swallows '-v' as a
@@ -70,6 +75,7 @@ function Show-Usage {
     Write-Host "  safe-claude update [-y] [--force]               Update the tool + image to latest main"
     Write-Host "  safe-claude list                                Show every sandbox and its state"
     Write-Host "  safe-claude rebuild <path_to_folder> [-y]       Move an existing sandbox onto the new image"
+    Write-Host "                                                  (--no-backup: proceed if the backup fails)"
     Write-Host "  safe-claude --version                           Print the installed version"
     Write-Host ""
     Write-Host "  Extra arguments are forwarded to 'claude', e.g.:"
@@ -431,16 +437,17 @@ function Invoke-List {
 # ── rebuild (opt-in per-sandbox migration onto the new image) ─────────────────
 
 function Invoke-Rebuild {
-    param([string[]]$RebuildArgs, [bool]$BoundYes)
+    param([string[]]$RebuildArgs, [bool]$BoundYes, [bool]$BoundNoBackup)
 
-    $assumeYes = $BoundYes; $pathArg = $null
+    $assumeYes = $BoundYes; $noBackup = $BoundNoBackup; $pathArg = $null
     foreach ($a in $RebuildArgs) {
         if     ($a -eq '-y' -or $a -eq '--yes') { $assumeYes = $true }
+        elseif ($a -eq '--no-backup')           { $noBackup  = $true }
         elseif ($a -like '-*')                  { Write-Err "Unknown option for 'rebuild': $a" }
         elseif ($pathArg)                       { Write-Err "'rebuild' takes a single folder; unexpected extra argument: $a" }
         else                                     { $pathArg = $a }
     }
-    if (-not $pathArg) { Write-Err "Usage: safe-claude rebuild <path_to_folder> [-y]" }
+    if (-not $pathArg) { Write-Err "Usage: safe-claude rebuild <path_to_folder> [-y] [--no-backup]" }
 
     Require-Docker
     Require-Image
@@ -462,7 +469,8 @@ function Invoke-Rebuild {
     Write-Host "  This recreates the sandbox on the current '$IMAGE_NAME' image."
     Write-Host "  Claude login/history is preserved via a Docker volume."
     Write-Host "  System packages installed inside the container (apt/pip) are NOT carried over"
-    Write-Host "  (a backup image of the old container is made, when Docker allows it)."
+    Write-Host "  (a backup image of the old container is made so you can recover them; if"
+    Write-Host "  that backup cannot be made, the rebuild stops rather than proceeding)."
     Write-Host ""
     if (-not $assumeYes) {
         if (-not (Confirm-Action "Rebuild this sandbox?")) { Write-Host "Rebuild cancelled."; return }
@@ -499,10 +507,9 @@ function Invoke-Rebuild {
             $volume = $usesVolume
         }
 
-        # Best-effort safety backup of the old container: this is what lets you
-        # recover apt/pip packages that would be tedious to reinstall. The
-        # container is disposable by design, so a failure is reported but does
-        # not stop the rebuild.
+        # Safety backup of the whole old container (captures apt/pip installs
+        # too). This is the only copy of anything installed inside it, so a
+        # failure here must not be shrugged off: the next step destroys it.
         $ts = Get-Date -Format "yyyyMMdd-HHmmss"
         $base = (Split-Path -Leaf $abs).ToLower() -replace '[^a-z0-9_-]', '-'
         $backup = "safe-claude-backup-$base-$ts"
@@ -515,10 +522,27 @@ function Invoke-Rebuild {
         }
 
         if (-not $backupOk) {
-            Write-Warn "Could not create the backup image; continuing without one."
+            Write-Warn "Could not create the backup image."
             if ($commitErr) { Write-Host "  Docker said: $commitErr" }
-            Write-Host "  Anything installed inside the old container will not be recoverable."
-            Write-Host "  Your files in $abs and your Claude login/history are unaffected."
+            Write-Host ""
+            Write-Host "  Rebuilding replaces the container. Without a backup, anything you"
+            Write-Host "  installed inside it (apt/pip packages, files outside /workspace) is"
+            Write-Host "  gone for good. Your project files in"
+            Write-Host "      $abs"
+            Write-Host "  and your Claude login/history are safe either way."
+            Write-Host ""
+            Write-Host "  To keep your own copy first, in another terminal:"
+            Write-Host "      docker export $container -o safe-claude-backup.tar"
+            Write-Host "  That writes a flat filesystem tar - expect it to be large."
+            Write-Host ""
+            if ($noBackup) {
+                Write-Warn "Continuing without a backup (--no-backup was given)."
+            } elseif ($assumeYes) {
+                Write-Err "Stopping. Re-run with --no-backup to rebuild without one."
+            } elseif (-not (Confirm-Action "Rebuild anyway, without a backup?")) {
+                Write-Host "Rebuild cancelled. The sandbox was left as it is."
+                return
+            }
         }
 
         Write-Info "Removing old container and recreating on the new image..."
@@ -578,7 +602,7 @@ if ($namedAFolder) {
 switch ($FolderPath) {
     'update'  { Invoke-Update  -UpdateArgs  $ClaudeArgs -BoundYes $Yes -BoundForce $Force; exit 0 }
     'list'    { Invoke-List    -ListArgs    $ClaudeArgs; exit 0 }
-    'rebuild' { Invoke-Rebuild -RebuildArgs $ClaudeArgs -BoundYes $Yes; exit 0 }
+    'rebuild' { Invoke-Rebuild -RebuildArgs $ClaudeArgs -BoundYes $Yes -BoundNoBackup $NoBackup; exit 0 }
 }
 
 # ── argument validation ───────────────────────────────────────────────────────

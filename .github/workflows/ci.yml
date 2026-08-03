@@ -52,6 +52,7 @@ jobs:
           check 'rebuild, two paths'   1 'unexpected extra argument'  -- rebuild /tmp /etc
           check 'update, bad flag'     1 'Unknown option'             -- update --bogus
           check 'list, bad arg'        1 'takes no arguments'         -- list --bogus
+          check 'rebuild --no-backup'  1 'Usage: safe-claude rebuild' -- rebuild --no-backup
           # The runner has Docker but no safe-claude containers.
           check 'list, no sandboxes'   0 'No sandboxes yet'           -- list
 
@@ -123,6 +124,8 @@ jobs:
               # Not testing bare 'list' here: the Windows runner's Docker is in
               # Windows-container mode, so `docker info` is not dependable.
               @{ Name = 'list, bad arg';      Args = @('list', '--bogus');  Code = 1; Want = 'takes no arguments' }
+              # --no-backup must be accepted, not rejected as an unknown option.
+              @{ Name = 'rebuild --no-backup'; Args = @('rebuild', '--no-backup'); Code = 1; Want = 'Usage: safe-claude rebuild'; Avoid = 'Unknown option' }
           )
 
           $fail = $false
