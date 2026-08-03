@@ -147,9 +147,10 @@ function Get-VolumeName { param([string]$ContainerName) return "$ContainerName-c
 # Source commit stamped into the current image by the Dockerfile LABEL.
 # Returns "unknown" for images built without the build-arg.
 function Get-ImageVersion {
-    $v = docker image inspect $IMAGE_NAME `
-            --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $v -or $v.Trim() -in @("", "<no value>")) { return "unknown" }
+    $img = Invoke-DockerInspect -Names @($IMAGE_NAME) -Image
+    if (-not $img) { return "unknown" }
+    $v = Get-LabelValue -Labels $img[0].Config.Labels -Name 'org.opencontainers.image.revision'
+    if (-not $v) { return "unknown" }
     return $v.Trim()
 }
 
@@ -158,6 +159,37 @@ function Get-LabelOr {
     param([string]$Value, [string]$Fallback)
     if (-not $Value -or $Value -eq "<no value>") { return $Fallback }
     return $Value
+}
+
+# Read one label off a parsed 'docker inspect' object, tolerating a container or
+# image that carries no labels at all.
+function Get-LabelValue {
+    param($Labels, [string]$Name)
+    if (-not $Labels) { return '' }
+    $prop = $Labels.PSObject.Properties[$Name]
+    if (-not $prop) { return '' }
+    return [string]$prop.Value
+}
+
+# Run 'docker inspect' and hand back parsed objects.
+#
+# Deliberately NOT using --format: PowerShell mangles a native-command argument
+# containing embedded double quotes when it builds the Windows command line, so
+# a Go template like {{index .Config.Labels "x"}} reaches docker malformed and
+# the call fails. Unix is unaffected, which is why this only ever broke on
+# Windows. JSON needs no quoting in the argument and ConvertFrom-Json is built in.
+function Invoke-DockerInspect {
+    param([string[]]$Names, [switch]$Image)
+
+    $json = if ($Image) { docker image inspect @Names 2>$null } else { docker inspect @Names 2>$null }
+    if ($LASTEXITCODE -ne 0 -or -not $json) { return @() }
+    try { return @($json | ConvertFrom-Json) } catch { return @() }
+}
+
+# The mount backing a destination inside the container, or $null.
+function Get-MountAt {
+    param($Container, [string]$Destination)
+    return ($Container.Mounts | Where-Object { $_.Destination -eq $Destination } | Select-Object -First 1)
 }
 
 # Every sandbox container (singular noun per PowerShell convention).
@@ -279,15 +311,11 @@ function Invoke-Update {
         Write-VersionFile $newSha
         Write-Success "Updated to $($newSha.Substring(0,8))."
 
-        $sandboxes = docker ps -a --filter name=safe-claude- --format '  {{.Names}} ({{.Status}})'
-        if ($sandboxes) {
+        if (Get-SandboxName) {
             Write-Host ""
-            Write-Warn "Existing sandboxes still run the previous image:"
-            Write-Host $sandboxes
-            Write-Host ""
-            Write-Host "  They keep working as-is. To move one onto the new image"
-            Write-Host "  (Claude login/history preserved), run:"
-            Write-Host "      safe-claude rebuild <path>"
+            Write-Warn "Existing sandboxes still run the previous image."
+            Write-Host "  They keep working as-is. See which, and how to move them over, with:"
+            Write-Host "      safe-claude list"
         }
     }
     finally {
@@ -310,26 +338,25 @@ function Invoke-List {
         return
     }
 
-    $currentId = docker image inspect $IMAGE_NAME --format '{{.Id}}' 2>$null
-    if ($LASTEXITCODE -ne 0) { $currentId = $null } else { $currentId = $currentId.Trim() }
+    $imageInfo = Invoke-DockerInspect -Names @($IMAGE_NAME) -Image
+    $currentId = if ($imageInfo) { $imageInfo[0].Id } else { $null }
     if (-not $currentId) {
         Write-Warn "The '$IMAGE_NAME' image is not built, so sandboxes cannot be compared against it."
     }
 
     # One inspect call for every sandbox, rather than one per sandbox.
-    $tmpl = '{{.Name}}|{{.State.Status}}|{{.Image}}|{{index .Config.Labels "safe-claude.path"}}|' +
-            '{{index .Config.Labels "safe-claude.version"}}|' +
-            '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}|' +
-            '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Name}}{{end}}{{end}}'
-    $raw = docker inspect --format $tmpl @names 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { Write-Err "Could not inspect the sandbox containers." }
+    $containers = Invoke-DockerInspect -Names $names
+    if (-not $containers) { Write-Err "Could not inspect the sandbox containers." }
 
     $rows = @(); $suggest = @(); $stale = 0; $noVolume = 0
-    foreach ($line in @($raw)) {
-        if (-not $line) { continue }
-        $f = $line -split '\|'
-        if ($f.Count -lt 7) { continue }
-        $status, $img, $lPath, $lVer, $mSrc, $vol = $f[1], $f[2], $f[3], $f[4], $f[5], $f[6]
+    foreach ($c in $containers) {
+        if (-not $c) { continue }
+        $status = $c.State.Status
+        $img    = $c.Image
+        $lPath  = Get-LabelValue -Labels $c.Config.Labels -Name 'safe-claude.path'
+        $lVer   = Get-LabelValue -Labels $c.Config.Labels -Name 'safe-claude.version'
+        $mSrc   = (Get-MountAt -Container $c -Destination '/workspace').Source
+        $vol    = (Get-MountAt -Container $c -Destination '/home/node/.claude').Name
 
         $path = Get-LabelOr -Value $lPath -Fallback $mSrc
         if (-not $path) { $path = '(unknown)' }
@@ -362,7 +389,9 @@ function Invoke-List {
 
     if (-not $rows) { Write-Err "Could not read any sandbox details." }
     $rows = @($rows | Sort-Object Folder)
-    $w = ($rows.Folder + 'FOLDER' | Measure-Object -Property Length -Maximum).Maximum
+    # @(...) on both sides: with a single row $rows.Folder is a scalar, and '+'
+    # would concatenate the strings instead of building a list.
+    $w = (@($rows.Folder) + @('FOLDER') | Measure-Object -Property Length -Maximum).Maximum
 
     Write-Host ""
     Write-Host ("{0,-$w}  {1,-8}  {2,-20}  {3,-9}  {4}" -f 'FOLDER', 'STATUS', 'IMAGE', '.claude', 'PATH')
@@ -424,8 +453,9 @@ function Invoke-Rebuild {
     }
 
     # Is /home/node/.claude already backed by a named volume?
-    $usesVolume = (docker inspect --format '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Name}}{{end}}{{end}}' $container)
-    if ($usesVolume) { $usesVolume = $usesVolume.Trim() }
+    $info = Invoke-DockerInspect -Names @($container)
+    $usesVolume = $null
+    if ($info) { $usesVolume = (Get-MountAt -Container $info[0] -Destination '/home/node/.claude').Name }
 
     $tmp = Join-Path $env:TEMP ("safe-claude-rebuild-" + [System.Guid]::NewGuid().ToString('N'))
     try {
