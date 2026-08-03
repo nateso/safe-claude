@@ -24,6 +24,30 @@ param(
     [Parameter(Position = 0)]
     [string]$FolderPath,
 
+    # Declared explicitly rather than being fished out of $ClaudeArgs. The binder
+    # reads a token like '-y' as a parameter name first; on PowerShell 7 an
+    # unmatched one does fall through to the ValueFromRemainingArguments
+    # parameter, but that is incidental, and the .bat wrapper invokes Windows
+    # PowerShell 5.1. Declaring these removes the ambiguity. The subcommands
+    # still accept '-y'/'--yes'/'--force' as plain strings, so both routes work.
+    #
+    # Trade-off: '-y' and '-Force' are now consumed by this script and no longer
+    # forwarded to 'claude'. Claude Code has no such flags, so nothing is lost.
+    [Alias('y')]
+    [switch]$Yes,
+
+    [switch]$Force,
+
+    # Likewise for the version/help flags, which were previously matched against
+    # $FolderPath and therefore never fired: PowerShell binds '--version' to a
+    # parameter rather than passing it positionally, and swallows '-v' as a
+    # prefix of the common -Verbose parameter. An explicit alias reclaims '-v'.
+    [Alias('v')]
+    [switch]$Version,
+
+    [Alias('h')]
+    [switch]$Help,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ClaudeArgs
 )
@@ -61,13 +85,59 @@ function Confirm-Action {
     return ($reply -match '^[Yy]$')
 }
 
+# Normalize a path before it is used for naming: full path, no trailing
+# separator, lowercased. Windows paths are case-insensitive and PowerShell's
+# tab-completion appends a trailing '\', so without this the same folder can
+# hash to several different container names -- meaning several sandboxes for one
+# project, and a 'rebuild C:\proj\' that reports no sandbox exists.
+function Get-NormalizedPath {
+    param([string]$Path)
+    $full = (Get-Item -LiteralPath $Path -ErrorAction Stop).FullName
+    # Keep the separator on a bare drive root ('C:\'); strip it everywhere else.
+    if ($full.Length -gt 3) { $full = $full.TrimEnd('\', '/') }
+    return $full.ToLowerInvariant()
+}
+
+# Derive a stable container name from a folder path.
+# -Legacy reproduces the pre-normalization naming, so a sandbox created by an
+# older version can still be located (see Resolve-ContainerName).
 function Get-ContainerName {
-    param([string]$AbsPath)
-    $base = (Split-Path -Leaf $AbsPath).ToLower() -replace '[^a-z0-9_-]', '-'
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($AbsPath)
+    param([string]$AbsPath, [switch]$Legacy)
+    $key = if ($Legacy) { $AbsPath } else { Get-NormalizedPath -Path $AbsPath }
+    $base = (Split-Path -Leaf $key).ToLower() -replace '[^a-z0-9_-]', '-'
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($key)
     $hashBytes = [System.Security.Cryptography.MD5]::Create().ComputeHash($bytes)
     $hash = ([System.BitConverter]::ToString($hashBytes) -replace '-', '').ToLower().Substring(0, 8)
     return "safe-claude-$base-$hash"
+}
+
+# Return the container name to use for a folder, adopting a sandbox created by
+# an older version that hashed the un-normalized path. Without this, the
+# normalization above would silently orphan every existing Windows sandbox.
+# Requires Docker, so call it after Require-Docker.
+function Resolve-ContainerName {
+    param([string]$AbsPath)
+
+    $name = Get-ContainerName -AbsPath $AbsPath
+    $null = docker container inspect $name 2>&1
+    if ($LASTEXITCODE -eq 0) { return $name }
+
+    $legacy = Get-ContainerName -AbsPath $AbsPath -Legacy
+    if ($legacy -eq $name) { return $name }
+
+    $null = docker container inspect $legacy 2>&1
+    if ($LASTEXITCODE -ne 0) { return $name }
+
+    Write-Info "Found sandbox '$legacy' from an older version; renaming it to '$name'."
+    docker rename $legacy $name 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Could not rename it - continuing under the existing name."
+        return $legacy
+    }
+    # Its '<old-name>-claude' volume keeps its original name and stays mounted.
+    # Nothing recomputes that name: 'rebuild' reads the container's actual mounts.
+    Write-Success "Sandbox renamed to '$name'."
+    return $name
 }
 
 function Get-VolumeName { param([string]$ContainerName) return "$ContainerName-claude" }
@@ -112,9 +182,9 @@ function Show-Version {
 # ── update ────────────────────────────────────────────────────────────────────
 
 function Invoke-Update {
-    param([string[]]$UpdateArgs)
+    param([string[]]$UpdateArgs, [bool]$BoundYes, [bool]$BoundForce)
 
-    $assumeYes = $false; $force = $false
+    $assumeYes = $BoundYes; $force = $BoundForce
     foreach ($a in $UpdateArgs) {
         switch ($a) {
             '-y'      { $assumeYes = $true }
@@ -200,9 +270,9 @@ function Invoke-Update {
 # ── rebuild (opt-in per-sandbox migration onto the new image) ─────────────────
 
 function Invoke-Rebuild {
-    param([string[]]$RebuildArgs)
+    param([string[]]$RebuildArgs, [bool]$BoundYes)
 
-    $assumeYes = $false; $pathArg = $null
+    $assumeYes = $BoundYes; $pathArg = $null
     foreach ($a in $RebuildArgs) {
         if     ($a -eq '-y' -or $a -eq '--yes') { $assumeYes = $true }
         elseif ($a -like '-*')                  { Write-Err "Unknown option for 'rebuild': $a" }
@@ -218,7 +288,7 @@ function Invoke-Rebuild {
     catch { Write-Err "Path does not exist: $pathArg" }
     if (-not (Test-Path -Path $abs -PathType Container)) { Write-Err "Not a directory: $pathArg" }
 
-    $container = Get-ContainerName -AbsPath $abs
+    $container = Resolve-ContainerName -AbsPath $abs
     $volume    = Get-VolumeName -ContainerName $container
 
     $null = docker container inspect $container 2>&1
@@ -293,14 +363,40 @@ function Invoke-Rebuild {
 
 # ── command dispatch ──────────────────────────────────────────────────────────
 
+# Where a '--version' / '--help' token ends up depends on the PowerShell version:
+# it may bind to the switch parameters declared above (PowerShell 7), arrive as
+# $FolderPath (Windows PowerShell 5.1), or land in $ClaudeArgs. All three are
+# accepted below. Do not "simplify" this to whichever branch your shell happens
+# to take -- handling only the $ClaudeArgs/switch route silently broke
+# 'safe-claude --version' on 5.1, which is the shell the .bat wrapper runs.
+$versionTokens = @('--version', '-v', 'version')
+$helpTokens    = @('--help', '-h', 'help')
+$subcommands   = @('update', 'rebuild')
+
+$requested = @()
+if ($FolderPath) { $requested += $FolderPath }
+if ($ClaudeArgs) { $requested += $ClaudeArgs }
+
+$namedAFolder = $FolderPath -and
+                ($versionTokens -notcontains $FolderPath) -and
+                ($helpTokens    -notcontains $FolderPath) -and
+                ($subcommands   -notcontains $FolderPath)
+
+if ($namedAFolder) {
+    # A folder was named, so '--help' / '--version' were meant for claude, not
+    # for us. Hand them back rather than swallowing them. The Where-Object is
+    # load-bearing: @($null) is a one-element array holding $null, which would
+    # otherwise pass an empty argument through to claude.
+    if ($Help)    { $ClaudeArgs = @(@($ClaudeArgs) | Where-Object { $_ }) + '--help' }
+    if ($Version) { $ClaudeArgs = @(@($ClaudeArgs) | Where-Object { $_ }) + '--version' }
+} else {
+    if ($Version -or ($requested | Where-Object { $versionTokens -contains $_ })) { Show-Version; exit 0 }
+    if ($Help    -or ($requested | Where-Object { $helpTokens    -contains $_ })) { Show-Usage;   exit 0 }
+}
+
 switch ($FolderPath) {
-    'update'    { Invoke-Update  -UpdateArgs  $ClaudeArgs; exit 0 }
-    'rebuild'   { Invoke-Rebuild -RebuildArgs $ClaudeArgs; exit 0 }
-    '--version' { Show-Version; exit 0 }
-    '-v'        { Show-Version; exit 0 }
-    'help'      { Show-Usage; exit 0 }
-    '--help'    { Show-Usage; exit 0 }
-    '-h'        { Show-Usage; exit 0 }
+    'update'  { Invoke-Update  -UpdateArgs  $ClaudeArgs -BoundYes $Yes -BoundForce $Force; exit 0 }
+    'rebuild' { Invoke-Rebuild -RebuildArgs $ClaudeArgs -BoundYes $Yes; exit 0 }
 }
 
 # ── argument validation ───────────────────────────────────────────────────────
@@ -320,14 +416,15 @@ if (-not (Test-Path -Path $AbsPath -PathType Container)) {
     Write-Err "Not a directory: $FolderPath"
 }
 
-$ContainerName = Get-ContainerName -AbsPath $AbsPath
-
 # ── pre-flight checks ─────────────────────────────────────────────────────────
 
 Require-Docker
 Require-Image
 
 # ── container lifecycle ───────────────────────────────────────────────────────
+
+# Resolved only now: adopting a sandbox from an older version needs Docker.
+$ContainerName = Resolve-ContainerName -AbsPath $AbsPath
 
 $null = docker container inspect $ContainerName 2>&1
 if ($LASTEXITCODE -ne 0) {
