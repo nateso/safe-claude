@@ -4,6 +4,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox
 # safe-claude update [-y] [--force]               Update tool + image to latest
+# safe-claude list                                Show every sandbox and its state
 # safe-claude rebuild <path_to_folder> [-y]        Rebuild one sandbox on new image
 # safe-claude --version                            Show installed version
 #
@@ -21,6 +22,7 @@ usage() {
   echo "Usage:"
   echo "  safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox for a folder"
   echo "  safe-claude update [-y] [--force]               Update the tool + image to latest main"
+  echo "  safe-claude list                                Show every sandbox and its state"
   echo "  safe-claude rebuild <path_to_folder> [-y]       Move an existing sandbox onto the new image"
   echo "  safe-claude --version                           Print the installed version"
   echo ""
@@ -88,6 +90,32 @@ require_docker() {
 require_image() {
   docker image inspect "$IMAGE_NAME" &>/dev/null \
     || err "'${IMAGE_NAME}' Docker image not found. Run install.sh (or 'safe-claude update') to build it first."
+}
+
+# Source commit stamped into the current image by the Dockerfile's LABEL.
+# Prints 'unknown' for images built without the build-arg.
+image_version() {
+  local v
+  v="$(docker image inspect "$IMAGE_NAME" \
+        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)" || v=""
+  if [[ -z "$v" || "$v" == "<no value>" ]]; then
+    printf 'unknown'
+  else
+    printf '%s' "$v"
+  fi
+}
+
+# Docker renders an unset label as '<no value>'. Echo $1, or $2 when $1 is unset.
+label_or() {
+  if [[ -z "$1" || "$1" == "<no value>" ]]; then printf '%s' "$2"; else printf '%s' "$1"; fi
+}
+
+# Names of all sandbox containers, newest Docker name-filter regex so we do not
+# match a user's unrelated container that merely contains the string, and
+# skipping the transient '-seed' helper a crashed rebuild can leave behind.
+sandbox_names() {
+  docker ps -a --filter 'name=^safe-claude-' --format '{{.Names}}' \
+    | grep -v -- '-seed$' || true
 }
 
 # ── version tracking ────────────────────────────────────────────────────────
@@ -172,7 +200,7 @@ cmd_update() {
   # text, and this Dockerfile has no COPY, so an unchanged Dockerfile would
   # otherwise rebuild to a byte-identical image -- including a stale Claude Code
   # install layer. '--force' therefore also means "do not trust the cache".
-  local build_args=(--pull)
+  local build_args=(--pull --build-arg "SAFE_CLAUDE_VERSION=${new_sha}")
   if [[ "$force" -eq 1 ]]; then
     build_args+=(--no-cache)
     info "Rebuilding Docker image '${IMAGE_NAME}' from scratch (--force: cache disabled)..."
@@ -187,15 +215,113 @@ cmd_update() {
 
   # Report existing sandboxes; do NOT recreate them.
   local sandboxes
-  sandboxes="$(docker ps -a --filter name=safe-claude- --format '  {{.Names}} ({{.Status}})' || true)"
+  sandboxes="$(sandbox_names)"
   if [[ -n "$sandboxes" ]]; then
     echo ""
-    warn "Existing sandboxes still run the previous image:"
-    echo "$sandboxes"
+    warn "Existing sandboxes still run the previous image."
+    echo "  They keep working as-is. See which, and how to move them over, with:"
+    echo "      safe-claude list"
+  fi
+}
+
+# ── list ─────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+  [[ $# -eq 0 ]] || err "'list' takes no arguments (got: $1)"
+
+  require_docker
+
+  local names
+  names="$(sandbox_names)"
+  if [[ -z "$names" ]]; then
+    info "No sandboxes yet. Create one with:  safe-claude <path_to_folder>"
+    return 0
+  fi
+
+  local current_id
+  current_id="$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}' 2>/dev/null || true)"
+  if [[ -z "$current_id" ]]; then
+    warn "The '${IMAGE_NAME}' image is not built, so sandboxes cannot be compared against it."
+  fi
+
+  # One inspect call for every sandbox, rather than one per sandbox.
+  local tmpl='{{.Name}}|{{.State.Status}}|{{.Image}}|{{index .Config.Labels "safe-claude.path"}}|{{index .Config.Labels "safe-claude.version"}}|{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}|{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Name}}{{end}}{{end}}'
+  local raw
+  # shellcheck disable=SC2086  # deliberate word-splitting: $names is a list
+  raw="$(docker inspect --format "$tmpl" $names 2>/dev/null || true)"
+  [[ -n "$raw" ]] || err "Could not inspect the sandbox containers."
+
+  local rows=() suggest=() width=6 total=0 stale=0 novolume=0 needs_rebuild=0
+  local name status img lpath lver msrc vol path folder ver image_col claude_col note
+
+  while IFS='|' read -r name status img lpath lver msrc vol; do
+    [[ -n "$name" ]] || continue
+    total=$((total + 1))
+
+    path="$(label_or "$lpath" "$msrc")"
+    [[ -n "$path" ]] || path="(unknown)"
+    folder="$(basename "$path")"
+
+    if [[ -z "$current_id" ]]; then
+      image_col="unknown"          # nothing to compare against
+    elif [[ "$img" == "$current_id" ]]; then
+      image_col="current"
+    else
+      image_col="outdated"
+      stale=$((stale + 1))
+    fi
+    ver="$(label_or "$lver" "")"
+    if [[ -n "$ver" ]]; then
+      image_col="${image_col} (${ver:0:8})"
+    fi
+
+    if [[ -z "$vol" || "$vol" == "<no value>" ]]; then
+      claude_col="in-image"
+      novolume=$((novolume + 1))
+    else
+      claude_col="volume"
+    fi
+
+    note=""
+    if [[ "$path" != "(unknown)" && ! -d "$path" ]]; then
+      note="  (folder missing)"
+    fi
+
+    # Only suggest a rebuild we could actually run: it needs the image present.
+    needs_rebuild=0
+    if [[ "$image_col" == outdated*   ]]; then needs_rebuild=1; fi
+    if [[ "$claude_col" == "in-image" ]]; then needs_rebuild=1; fi
+    if [[ -z "$current_id" || "$path" == "(unknown)" ]]; then needs_rebuild=0; fi
+    if [[ "$needs_rebuild" -eq 1 ]]; then suggest+=("$path"); fi
+
+    [[ ${#folder} -le $width ]] || width=${#folder}
+    rows+=("${folder}|${status}|${image_col}|${claude_col}|${path}${note}")
+  done <<< "$raw"
+
+  [[ ${#rows[@]} -gt 0 ]] || err "Could not read any sandbox details."
+
+  echo ""
+  printf '%-*s  %-8s  %-20s  %-9s  %s\n' "$width" "FOLDER" "STATUS" "IMAGE" ".claude" "PATH"
+  while IFS='|' read -r folder status image_col claude_col path; do
+    printf '%-*s  %-8s  %-20s  %-9s  %s\n' \
+      "$width" "$folder" "$status" "$image_col" "$claude_col" "$path"
+  done < <(printf '%s\n' "${rows[@]}" | sort)
+
+  echo ""
+  printf '%d sandbox' "$total"
+  [[ "$total" -eq 1 ]] || printf 'es'
+  printf '.'
+  [[ "$stale"    -eq 0 ]] || printf '  %d on an older image.' "$stale"
+  [[ "$novolume" -eq 0 ]] || printf '  %d without a persistent .claude volume.' "$novolume"
+  printf '\n'
+
+  if [[ ${#suggest[@]} -gt 0 ]]; then
     echo ""
-    echo "  They keep working as-is. To move one onto the new image"
-    echo "  (Claude login/history preserved), run:"
-    echo "      safe-claude rebuild <path>"
+    echo "  Move a sandbox onto the current image (login/history preserved):"
+    # read -r, not word splitting: paths may contain spaces.
+    while IFS= read -r path; do
+      echo "      safe-claude rebuild ${path}"
+    done < <(printf '%s\n' "${suggest[@]}" | sort -u)
   fi
 }
 
@@ -293,6 +419,8 @@ cmd_rebuild() {
   docker rm -f "$container" >/dev/null
   docker run -dit \
     --name "$container" \
+    --label "safe-claude.path=${abs}" \
+    --label "safe-claude.version=$(image_version)" \
     -v "${abs}:/workspace" \
     -v "${volume}:/home/node/.claude" \
     "$IMAGE_NAME" >/dev/null \
@@ -310,6 +438,7 @@ cmd_rebuild() {
 
 case "${1:-}" in
   update)         shift; cmd_update  "$@"; exit $? ;;
+  list)           shift; cmd_list    "$@"; exit $? ;;
   rebuild)        shift; cmd_rebuild "$@"; exit $? ;;
   --version|-v)   print_version; exit 0 ;;
   help|--help|-h) usage; exit 0 ;;
@@ -346,6 +475,8 @@ if ! docker container inspect "$CONTAINER" &>/dev/null; then
   echo "No container found for this folder. Creating '${CONTAINER}'..."
   docker run -dit \
     --name "$CONTAINER" \
+    --label "safe-claude.path=${ABS_PATH}" \
+    --label "safe-claude.version=$(image_version)" \
     -v "${ABS_PATH}:/workspace" \
     -v "${CONTAINER}-claude:/home/node/.claude" \
     "$IMAGE_NAME" \

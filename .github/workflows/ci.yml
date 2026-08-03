@@ -51,6 +51,9 @@ jobs:
           check 'rebuild, no path'     1 'Usage: safe-claude rebuild' -- rebuild
           check 'rebuild, two paths'   1 'unexpected extra argument'  -- rebuild /tmp /etc
           check 'update, bad flag'     1 'Unknown option'             -- update --bogus
+          check 'list, bad arg'        1 'takes no arguments'         -- list --bogus
+          # The runner has Docker but no safe-claude containers.
+          check 'list, no sandboxes'   0 'No sandboxes yet'           -- list
 
           # --version must never fall through to the usage screen.
           if ./safe-claude --version 2>&1 | grep -q 'Usage:'; then
@@ -117,6 +120,9 @@ jobs:
               @{ Name = 'rebuild, no path';   Args = @('rebuild');          Code = 1; Want = 'Usage: safe-claude rebuild' }
               @{ Name = 'rebuild -y';         Args = @('rebuild', '-y');    Code = 1; Want = 'Usage: safe-claude rebuild'; Avoid = 'Unknown option' }
               @{ Name = 'update, bad flag';   Args = @('update', '--bogus');Code = 1; Want = 'Unknown option' }
+              # Not testing bare 'list' here: the Windows runner's Docker is in
+              # Windows-container mode, so `docker info` is not dependable.
+              @{ Name = 'list, bad arg';      Args = @('list', '--bogus');  Code = 1; Want = 'takes no arguments' }
           )
 
           $fail = $false

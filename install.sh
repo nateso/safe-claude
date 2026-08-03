@@ -42,6 +42,12 @@ fi
 
 success "Docker is available and running."
 
+# Resolve the source commit up front: it is stamped into the image below and
+# recorded for 'safe-claude --version' further down.
+if ! SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null); then
+  SHA="unknown"
+fi
+
 # ── step 2: build the Docker image ──────────────────────────────────────────
 
 echo ""
@@ -57,7 +63,7 @@ if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
   info "Building Docker image '${IMAGE_NAME}' (this may take a few minutes)..."
   # --pull so a rebuild actually refreshes the base image rather than reusing a
   # stale local copy.
-  docker build --pull -t "$IMAGE_NAME" "$SCRIPT_DIR"
+  docker build --pull --build-arg "SAFE_CLAUDE_VERSION=${SHA}" -t "$IMAGE_NAME" "$SCRIPT_DIR"
   success "Docker image '${IMAGE_NAME}' built successfully."
 else
   info "Skipping image build."
@@ -106,12 +112,11 @@ success "'safe-claude' installed to '${DEST}'."
 # date" and 'safe-claude --version' can report it. Written to the user's config
 # dir (never needs sudo).
 mkdir -p "$(dirname "$VERSION_FILE")"
-if SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null); then
-  printf '%s\n' "$SHA" > "$VERSION_FILE"
-  success "Recorded version ${SHA:0:8}."
-else
-  printf '%s\n' "unknown" > "$VERSION_FILE"
+printf '%s\n' "$SHA" > "$VERSION_FILE"
+if [[ "$SHA" == "unknown" ]]; then
   warn "Not a git checkout — recorded version as 'unknown'."
+else
+  success "Recorded version ${SHA:0:8}."
 fi
 
 # ── step 4: verify ───────────────────────────────────────────────────────────

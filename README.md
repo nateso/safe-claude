@@ -97,6 +97,33 @@ Each container also gets a small per-folder Docker volume (`<container_name>-cla
 Sandboxes created **before** this version have no such volume: their login and history sit inside the container itself, where recreating it would destroy them. `safe-claude rebuild` migrates them onto a volume — see [Updating](#updating).
 
 
+## Listing your sandboxes
+
+```bash
+safe-claude list
+```
+
+```
+FOLDER     STATUS    IMAGE                 .claude    PATH
+gone       exited    current (a5697472)    volume     /Users/anna/old        (folder missing)
+myproject  running   current (a5697472)    volume     /Users/anna/code/myproject
+scratch    exited    outdated              in-image   /Users/anna/tmp/scratch
+thesis     exited    outdated (4ff9405a)   volume     /Users/anna/docs/thesis
+
+4 sandboxes.  2 on an older image.  1 without a persistent .claude volume.
+
+  Move a sandbox onto the current image (login/history preserved):
+      safe-claude rebuild /Users/anna/tmp/scratch
+      safe-claude rebuild /Users/anna/docs/thesis
+```
+
+- **IMAGE** — `current` if the sandbox runs the image you have now, `outdated` if not. The commit in brackets is the version the sandbox was built on; it reads `unknown` for sandboxes created before version stamping.
+- **`.claude`** — `volume` means your Claude login and session history are on a persistent volume and survive recreation. `in-image` means they are inside the container itself and would be lost if it were recreated.
+- **(folder missing)** — the host folder has been moved or deleted, so the sandbox has nothing to work on.
+
+Anything needing attention is printed with the exact `rebuild` command to fix it.
+
+
 ## Updating
 
 To upgrade `safe-claude` to the latest version on `main`:
@@ -116,7 +143,7 @@ safe-claude update
 - `-y` skips the confirmation prompt.
 - `--force` reinstalls even when you are already up to date, and rebuilds the image from scratch with the Docker layer cache disabled. Use it when you want to be certain the image picks up a fresh Claude Code install rather than a cached layer.
 
-New sandboxes you create after updating automatically use the new image. **Existing** sandboxes keep running the previous image until you explicitly move them over:
+New sandboxes you create after updating automatically use the new image. **Existing** sandboxes keep running the previous image until you explicitly move them over — run `safe-claude list` to see which ones, then:
 
 ```bash
 safe-claude rebuild /path/to/your/project      # add -y to skip the confirmation

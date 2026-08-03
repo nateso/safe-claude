@@ -43,4 +43,10 @@ USER node
 # "Auto-update failed: no write permission to npm prefix".
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
+# Stamp the source commit into the image so 'safe-claude list' can report which
+# version a sandbox runs. Deliberately the last instruction: a new version must
+# not invalidate the cache for the expensive layers above it.
+ARG SAFE_CLAUDE_VERSION=unknown
+LABEL org.opencontainers.image.revision="$SAFE_CLAUDE_VERSION"
+
 CMD ["bash"]

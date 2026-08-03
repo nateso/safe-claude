@@ -6,6 +6,7 @@
 .DESCRIPTION
     safe-claude.ps1 <path_to_folder> [claude-args...]   Enter/create a sandbox
     safe-claude.ps1 update [-y] [--force]               Update tool + image to latest main
+    safe-claude.ps1 list                                Show every sandbox and its state
     safe-claude.ps1 rebuild <path_to_folder> [-y]       Move a sandbox onto the new image
     safe-claude.ps1 --version                           Print the installed version
 
@@ -67,6 +68,7 @@ function Show-Usage {
     Write-Host "Usage:"
     Write-Host "  safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox for a folder"
     Write-Host "  safe-claude update [-y] [--force]               Update the tool + image to latest main"
+    Write-Host "  safe-claude list                                Show every sandbox and its state"
     Write-Host "  safe-claude rebuild <path_to_folder> [-y]       Move an existing sandbox onto the new image"
     Write-Host "  safe-claude --version                           Print the installed version"
     Write-Host ""
@@ -141,6 +143,32 @@ function Resolve-ContainerName {
 }
 
 function Get-VolumeName { param([string]$ContainerName) return "$ContainerName-claude" }
+
+# Source commit stamped into the current image by the Dockerfile LABEL.
+# Returns "unknown" for images built without the build-arg.
+function Get-ImageVersion {
+    $v = docker image inspect $IMAGE_NAME `
+            --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $v -or $v.Trim() -in @("", "<no value>")) { return "unknown" }
+    return $v.Trim()
+}
+
+# Docker renders an unset label as "<no value>".
+function Get-LabelOr {
+    param([string]$Value, [string]$Fallback)
+    if (-not $Value -or $Value -eq "<no value>") { return $Fallback }
+    return $Value
+}
+
+# Every sandbox container (singular noun per PowerShell convention).
+# The anchored regex avoids matching a user container
+# that merely contains the string, and the transient "-seed" helper a crashed
+# rebuild can leave behind is skipped.
+function Get-SandboxName {
+    $names = docker ps -a --filter 'name=^safe-claude-' --format '{{.Names}}'
+    if ($LASTEXITCODE -ne 0 -or -not $names) { return @() }
+    return @($names | Where-Object { $_ -and $_ -notlike '*-seed' })
+}
 
 function Require-Docker {
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -237,7 +265,7 @@ function Invoke-Update {
         # Dockerfile would otherwise rebuild to a byte-identical image --
         # including a stale Claude Code install layer. '--force' therefore also
         # means "do not trust the cache".
-        $buildArgs = @('--pull')
+        $buildArgs = @('--pull', '--build-arg', "SAFE_CLAUDE_VERSION=$newSha")
         if ($force) {
             $buildArgs += '--no-cache'
             Write-Info "Rebuilding Docker image '$IMAGE_NAME' from scratch (--force: cache disabled)..."
@@ -264,6 +292,94 @@ function Invoke-Update {
     }
     finally {
         if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+    }
+}
+
+# ── list ──────────────────────────────────────────────────────────────────────
+
+function Invoke-List {
+    param([string[]]$ListArgs)
+
+    if ($ListArgs) { Write-Err "'list' takes no arguments (got: $($ListArgs[0]))" }
+
+    Require-Docker
+
+    $names = Get-SandboxName
+    if (-not $names) {
+        Write-Info "No sandboxes yet. Create one with:  safe-claude <path_to_folder>"
+        return
+    }
+
+    $currentId = docker image inspect $IMAGE_NAME --format '{{.Id}}' 2>$null
+    if ($LASTEXITCODE -ne 0) { $currentId = $null } else { $currentId = $currentId.Trim() }
+    if (-not $currentId) {
+        Write-Warn "The '$IMAGE_NAME' image is not built, so sandboxes cannot be compared against it."
+    }
+
+    # One inspect call for every sandbox, rather than one per sandbox.
+    $tmpl = '{{.Name}}|{{.State.Status}}|{{.Image}}|{{index .Config.Labels "safe-claude.path"}}|' +
+            '{{index .Config.Labels "safe-claude.version"}}|' +
+            '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}|' +
+            '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Name}}{{end}}{{end}}'
+    $raw = docker inspect --format $tmpl @names 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { Write-Err "Could not inspect the sandbox containers." }
+
+    $rows = @(); $suggest = @(); $stale = 0; $noVolume = 0
+    foreach ($line in @($raw)) {
+        if (-not $line) { continue }
+        $f = $line -split '\|'
+        if ($f.Count -lt 7) { continue }
+        $status, $img, $lPath, $lVer, $mSrc, $vol = $f[1], $f[2], $f[3], $f[4], $f[5], $f[6]
+
+        $path = Get-LabelOr -Value $lPath -Fallback $mSrc
+        if (-not $path) { $path = '(unknown)' }
+
+        if (-not $currentId)        { $image = 'unknown' }   # nothing to compare against
+        elseif ($img -eq $currentId){ $image = 'current' }
+        else                        { $image = 'outdated'; $stale++ }
+        $ver = Get-LabelOr -Value $lVer -Fallback ''
+        if ($ver) { $image = "$image ($($ver.Substring(0, [Math]::Min(8, $ver.Length))))" }
+
+        $vol = Get-LabelOr -Value $vol -Fallback ''
+        if ($vol) { $claude = 'volume' } else { $claude = 'in-image'; $noVolume++ }
+
+        $note = ''
+        if ($path -ne '(unknown)' -and -not (Test-Path -LiteralPath $path)) { $note = '  (folder missing)' }
+
+        # Only suggest a rebuild we could actually run: it needs the image present.
+        if ($currentId -and $path -ne '(unknown)' -and ($image -like 'outdated*' -or $claude -eq 'in-image')) {
+            $suggest += $path
+        }
+
+        $rows += [pscustomobject]@{
+            Folder = Split-Path -Leaf $path
+            Status = $status
+            Image  = $image
+            Claude = $claude
+            Path   = "$path$note"
+        }
+    }
+
+    if (-not $rows) { Write-Err "Could not read any sandbox details." }
+    $rows = @($rows | Sort-Object Folder)
+    $w = ($rows.Folder + 'FOLDER' | Measure-Object -Property Length -Maximum).Maximum
+
+    Write-Host ""
+    Write-Host ("{0,-$w}  {1,-8}  {2,-20}  {3,-9}  {4}" -f 'FOLDER', 'STATUS', 'IMAGE', '.claude', 'PATH')
+    foreach ($r in $rows) {
+        Write-Host ("{0,-$w}  {1,-8}  {2,-20}  {3,-9}  {4}" -f $r.Folder, $r.Status, $r.Image, $r.Claude, $r.Path)
+    }
+
+    Write-Host ""
+    $summary = "$($rows.Count) sandbox" + $(if ($rows.Count -eq 1) { '.' } else { 'es.' })
+    if ($stale)    { $summary += "  $stale on an older image." }
+    if ($noVolume) { $summary += "  $noVolume without a persistent .claude volume." }
+    Write-Host $summary
+
+    if ($suggest) {
+        Write-Host ""
+        Write-Host "  Move a sandbox onto the current image (login/history preserved):"
+        foreach ($p in ($suggest | Sort-Object -Unique)) { Write-Host "      safe-claude rebuild $p" }
     }
 }
 
@@ -346,7 +462,7 @@ function Invoke-Rebuild {
 
         Write-Info "Removing old container and recreating on the new image..."
         docker rm -f $container | Out-Null
-        docker run -dit --name $container -v "${abs}:/workspace" -v "${volume}:/home/node/.claude" $IMAGE_NAME | Out-Null
+        docker run -dit --name $container --label "safe-claude.path=$abs" --label "safe-claude.version=$(Get-ImageVersion)" -v "${abs}:/workspace" -v "${volume}:/home/node/.claude" $IMAGE_NAME | Out-Null
         if ($LASTEXITCODE -ne 0) { Write-Err "Failed to recreate container. Your files are safe in $abs; backup image: $backup." }
 
         Write-Success "Sandbox rebuilt on the '$IMAGE_NAME' image."
@@ -371,7 +487,7 @@ function Invoke-Rebuild {
 # 'safe-claude --version' on 5.1, which is the shell the .bat wrapper runs.
 $versionTokens = @('--version', '-v', 'version')
 $helpTokens    = @('--help', '-h', 'help')
-$subcommands   = @('update', 'rebuild')
+$subcommands   = @('update', 'rebuild', 'list')
 
 $requested = @()
 if ($FolderPath) { $requested += $FolderPath }
@@ -396,6 +512,7 @@ if ($namedAFolder) {
 
 switch ($FolderPath) {
     'update'  { Invoke-Update  -UpdateArgs  $ClaudeArgs -BoundYes $Yes -BoundForce $Force; exit 0 }
+    'list'    { Invoke-List    -ListArgs    $ClaudeArgs; exit 0 }
     'rebuild' { Invoke-Rebuild -RebuildArgs $ClaudeArgs -BoundYes $Yes; exit 0 }
 }
 
@@ -433,6 +550,8 @@ if ($LASTEXITCODE -ne 0) {
     Write-Info "No container found for this folder. Creating '$ContainerName'..."
     docker run -dit `
         --name $ContainerName `
+        --label "safe-claude.path=$AbsPath" `
+        --label "safe-claude.version=$(Get-ImageVersion)" `
         -v "${AbsPath}:/workspace" `
         -v "${ContainerName}-claude:/home/node/.claude" `
         $IMAGE_NAME | Out-Null
