@@ -62,7 +62,9 @@ if ($LASTEXITCODE -eq 0) {
 
 if ($rebuild -match '^[Yy]$') {
     Write-Info "Building Docker image '$IMAGE_NAME' (this may take a few minutes)..."
-    docker build -t $IMAGE_NAME $ScriptDir
+    # --pull so a rebuild actually refreshes the base image rather than reusing a
+    # stale local copy.
+    docker build --pull -t $IMAGE_NAME $ScriptDir
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Docker build failed. Check the output above for details."
     }

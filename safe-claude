@@ -29,8 +29,10 @@ usage() {
   echo ""
   echo "    safe-claude ~/project --dangerously-skip-permissions"
   echo ""
+  echo "  'update --force' also rebuilds the image with the Docker layer cache"
+  echo "  disabled, forcing a fresh Claude Code install into it."
+  echo ""
   echo "  Run install.sh first to build the '${IMAGE_NAME}' Docker image."
-  exit 1
 }
 
 err() {
@@ -54,7 +56,7 @@ confirm() {
 resolve_abs() {
   local p="$1"
   if command -v realpath &>/dev/null; then
-    realpath "$p"
+    realpath "$p" 2>/dev/null || err "Path does not exist: $p"
   else
     (cd "$p" 2>/dev/null && pwd) || err "Path does not exist: $p"
   fi
@@ -163,8 +165,18 @@ cmd_update() {
   fi
   success "Command updated."
 
-  info "Rebuilding Docker image '${IMAGE_NAME}' (this may take a few minutes)..."
-  docker build -t "$IMAGE_NAME" "$tmp" || err "Docker build failed. See output above."
+  # --pull refreshes the base image. Docker keys its layer cache on instruction
+  # text, and this Dockerfile has no COPY, so an unchanged Dockerfile would
+  # otherwise rebuild to a byte-identical image -- including a stale Claude Code
+  # install layer. '--force' therefore also means "do not trust the cache".
+  local build_args=(--pull)
+  if [[ "$force" -eq 1 ]]; then
+    build_args+=(--no-cache)
+    info "Rebuilding Docker image '${IMAGE_NAME}' from scratch (--force: cache disabled)..."
+  else
+    info "Rebuilding Docker image '${IMAGE_NAME}' (this may take a few minutes)..."
+  fi
+  docker build "${build_args[@]}" -t "$IMAGE_NAME" "$tmp" || err "Docker build failed. See output above."
   success "Image '${IMAGE_NAME}' rebuilt."
 
   write_version "$new_sha"
@@ -192,7 +204,9 @@ cmd_rebuild() {
     case "$1" in
       -y|--yes) assume_yes=1; shift ;;
       -*) err "Unknown option for 'rebuild': $1" ;;
-      *)  patharg="$1"; shift ;;
+      *)  [[ -z "$patharg" ]] \
+            || err "'rebuild' takes a single folder; unexpected extra argument: $1"
+          patharg="$1"; shift ;;
     esac
   done
   [[ -n "$patharg" ]] || err "Usage: safe-claude rebuild <path_to_folder> [-y]"
@@ -248,6 +262,10 @@ cmd_rebuild() {
     docker run -d --name "$helper" -v "$volume:/dest" "$IMAGE_NAME" tail -f /dev/null >/dev/null
     docker cp "$tmp/claude/." "$helper:/dest/" \
       || { docker rm -f "$helper" &>/dev/null; err "Failed to seed volume '${volume}'."; }
+    # 1000:1000 is the image's built-in 'node' user, which is who Claude runs as
+    # on macOS/Windows. On Linux, entering the sandbox re-chowns /home/node to
+    # your host UID/GID (see the RUN_USER block below), so this is just a sane
+    # starting point rather than the final ownership.
     docker exec -u 0 "$helper" sh -c 'chown -R 1000:1000 /dest' || true
     docker rm -f "$helper" >/dev/null
     success "Volume '${volume}' seeded from the old container."
@@ -288,25 +306,21 @@ case "${1:-}" in
   update)         shift; cmd_update  "$@"; exit $? ;;
   rebuild)        shift; cmd_rebuild "$@"; exit $? ;;
   --version|-v)   print_version; exit 0 ;;
-  help|--help|-h) usage ;;
+  help|--help|-h) usage; exit 0 ;;
 esac
 
 # ── argument validation ─────────────────────────────────────────────────────
 
 if [[ $# -eq 0 ]]; then
-  usage
+  usage >&2
+  exit 1
 fi
 
 FOLDER_PATH="$1"
 shift   # any remaining args ("$@") are forwarded verbatim to `claude`
 
 # Resolve to absolute path (works even if the path contains symlinks)
-if command -v realpath &>/dev/null; then
-  ABS_PATH=$(realpath "$FOLDER_PATH")
-else
-  ABS_PATH=$(cd "$FOLDER_PATH" 2>/dev/null && pwd) \
-    || err "Path does not exist: $FOLDER_PATH"
-fi
+ABS_PATH="$(resolve_abs "$FOLDER_PATH")"
 
 [[ -d "$ABS_PATH" ]] || err "Not a directory: $FOLDER_PATH"
 

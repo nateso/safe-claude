@@ -49,6 +49,9 @@ function Show-Usage {
     Write-Host "  Extra arguments are forwarded to 'claude', e.g.:"
     Write-Host "    safe-claude C:\project --dangerously-skip-permissions"
     Write-Host ""
+    Write-Host "  'update --force' also rebuilds the image with the Docker layer cache"
+    Write-Host "  disabled, forcing a fresh Claude Code install into it."
+    Write-Host ""
     Write-Host "  Run install.ps1 first to build the '$IMAGE_NAME' Docker image."
 }
 
@@ -159,8 +162,19 @@ function Invoke-Update {
         Move-Item -Path $tmpDest -Destination $self -Force
         Write-Success "Command updated."
 
-        Write-Info "Rebuilding Docker image '$IMAGE_NAME' (this may take a few minutes)..."
-        docker build -t $IMAGE_NAME $tmp
+        # --pull refreshes the base image. Docker keys its layer cache on
+        # instruction text, and this Dockerfile has no COPY, so an unchanged
+        # Dockerfile would otherwise rebuild to a byte-identical image --
+        # including a stale Claude Code install layer. '--force' therefore also
+        # means "do not trust the cache".
+        $buildArgs = @('--pull')
+        if ($force) {
+            $buildArgs += '--no-cache'
+            Write-Info "Rebuilding Docker image '$IMAGE_NAME' from scratch (--force: cache disabled)..."
+        } else {
+            Write-Info "Rebuilding Docker image '$IMAGE_NAME' (this may take a few minutes)..."
+        }
+        docker build @buildArgs -t $IMAGE_NAME $tmp
         if ($LASTEXITCODE -ne 0) { Write-Err "Docker build failed. See output above." }
         Write-Success "Image '$IMAGE_NAME' rebuilt."
 
@@ -192,6 +206,7 @@ function Invoke-Rebuild {
     foreach ($a in $RebuildArgs) {
         if     ($a -eq '-y' -or $a -eq '--yes') { $assumeYes = $true }
         elseif ($a -like '-*')                  { Write-Err "Unknown option for 'rebuild': $a" }
+        elseif ($pathArg)                       { Write-Err "'rebuild' takes a single folder; unexpected extra argument: $a" }
         else                                     { $pathArg = $a }
     }
     if (-not $pathArg) { Write-Err "Usage: safe-claude rebuild <path_to_folder> [-y]" }
@@ -242,6 +257,8 @@ function Invoke-Rebuild {
             docker run -d --name $helper -v "${volume}:/dest" $IMAGE_NAME tail -f /dev/null | Out-Null
             docker cp "$claudeTmp/." "${helper}:/dest/"
             if ($LASTEXITCODE -ne 0) { docker rm -f $helper 2>&1 | Out-Null; Write-Err "Failed to seed volume '$volume'." }
+            # 1000:1000 is the image's built-in 'node' user, which is who Claude
+            # runs as inside the container on Docker Desktop.
             docker exec -u 0 $helper sh -c 'chown -R 1000:1000 /dest' | Out-Null
             docker rm -f $helper | Out-Null
             Write-Success "Volume '$volume' seeded from the old container."
@@ -281,9 +298,9 @@ switch ($FolderPath) {
     'rebuild'   { Invoke-Rebuild -RebuildArgs $ClaudeArgs; exit 0 }
     '--version' { Show-Version; exit 0 }
     '-v'        { Show-Version; exit 0 }
-    'help'      { Show-Usage; exit 1 }
-    '--help'    { Show-Usage; exit 1 }
-    '-h'        { Show-Usage; exit 1 }
+    'help'      { Show-Usage; exit 0 }
+    '--help'    { Show-Usage; exit 0 }
+    '-h'        { Show-Usage; exit 0 }
 }
 
 # ── argument validation ───────────────────────────────────────────────────────
@@ -344,5 +361,5 @@ if ($ClaudeArgs -contains "--dangerously-skip-permissions") {
 }
 
 Write-Info "Type 'exit' or press Ctrl+D to leave the container."
-Write-Info ""
+Write-Host ""
 docker exec -it $ContainerName claude @ClaudeArgs

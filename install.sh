@@ -55,7 +55,9 @@ fi
 
 if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
   info "Building Docker image '${IMAGE_NAME}' (this may take a few minutes)..."
-  docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+  # --pull so a rebuild actually refreshes the base image rather than reusing a
+  # stale local copy.
+  docker build --pull -t "$IMAGE_NAME" "$SCRIPT_DIR"
   success "Docker image '${IMAGE_NAME}' built successfully."
 else
   info "Skipping image build."
