@@ -7,10 +7,13 @@ set -euo pipefail
 # 1. Checks prerequisites (Docker)
 # 2. Builds the 'safe-claude' Docker image
 # 3. Installs the 'safe-claude' script to a directory on your PATH
+#
+# Usage: ./install.sh [--install-dir <path>]
 # ---------------------------------------------------------------------------
 
 IMAGE_NAME="safe-claude"
 DEFAULT_INSTALL_DIR="/usr/local/bin"
+VERSION_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/safe-claude/version"
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -21,6 +24,32 @@ err()     { echo "[safe-claude] Error: $*" >&2; exit 1; }
 
 # Resolve the directory that contains this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── options ─────────────────────────────────────────────────────────────────
+
+INSTALL_DIR="${INSTALL_DIR:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --install-dir)   INSTALL_DIR="${2:-}"; [[ -n "$INSTALL_DIR" ]] || err "--install-dir needs a path"; shift 2 ;;
+    --install-dir=*) INSTALL_DIR="${1#*=}"; shift ;;
+    -h|--help)
+      echo "Usage: ./install.sh [--install-dir <path>]"
+      echo ""
+      echo "  --install-dir <path>  Where to put the 'safe-claude' command."
+      echo "                        Default: ${DEFAULT_INSTALL_DIR}"
+      exit 0
+      ;;
+    *) err "Unknown option: $1 (try --help)" ;;
+  esac
+done
+
+USING_DEFAULT=0
+if [[ -z "$INSTALL_DIR" ]]; then
+  INSTALL_DIR="$DEFAULT_INSTALL_DIR"
+  USING_DEFAULT=1
+fi
+INSTALL_DIR="${INSTALL_DIR%/}"
 
 # ── step 1: prerequisites ───────────────────────────────────────────────────
 
@@ -41,20 +70,42 @@ fi
 
 success "Docker is available and running."
 
+# Resolve the source commit up front: it is stamped into the image below and
+# recorded for 'safe-claude --version' further down.
+if ! SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null); then
+  SHA="unknown"
+fi
+
 # ── step 2: build the Docker image ──────────────────────────────────────────
 
 echo ""
 if docker image inspect "$IMAGE_NAME" &>/dev/null; then
-  warn "Docker image '${IMAGE_NAME}' already exists."
-  read -rp "         Rebuild it? [y/N] " REBUILD
-  REBUILD="${REBUILD:-N}"
+  # Compare the image's stamped commit with this checkout. An image built from
+  # different source is the common cause of "I reinstalled but nothing changed",
+  # so recommend rebuilding in that case rather than defaulting to skip.
+  IMG_SHA="$(docker image inspect "$IMAGE_NAME" \
+      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  if [[ -z "$IMG_SHA" || "$IMG_SHA" == "<no value>" ]]; then IMG_SHA="unknown"; fi
+
+  if [[ "$SHA" != "unknown" && "$IMG_SHA" == "$SHA" ]]; then
+    warn "Docker image '${IMAGE_NAME}' already exists and matches this checkout (${SHA:0:8})."
+    read -rp "         Rebuild it anyway? [y/N] " REBUILD
+    REBUILD="${REBUILD:-N}"
+  else
+    warn "Docker image '${IMAGE_NAME}' exists but was built from ${IMG_SHA:0:8}, not this checkout (${SHA:0:8})."
+    warn "Rebuilding keeps the image in step with the command being installed."
+    read -rp "         Rebuild it? [Y/n] " REBUILD
+    REBUILD="${REBUILD:-Y}"
+  fi
 else
   REBUILD="y"
 fi
 
 if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
   info "Building Docker image '${IMAGE_NAME}' (this may take a few minutes)..."
-  docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+  # --pull so a rebuild actually refreshes the base image rather than reusing a
+  # stale local copy.
+  docker build --pull --build-arg "SAFE_CLAUDE_VERSION=${SHA}" -t "$IMAGE_NAME" "$SCRIPT_DIR"
   success "Docker image '${IMAGE_NAME}' built successfully."
 else
   info "Skipping image build."
@@ -63,28 +114,20 @@ fi
 # ── step 3: install the safe-claude script ───────────────────────────────────
 
 echo ""
-info "Where should the 'safe-claude' command be installed?"
-info "It must be a directory on your PATH."
-read -rp "         Install directory [${DEFAULT_INSTALL_DIR}]: " INSTALL_DIR
-INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
-
-# Strip trailing slash
-INSTALL_DIR="${INSTALL_DIR%/}"
+info "Installing the 'safe-claude' command to:"
+echo "               ${INSTALL_DIR}"
+if [[ "$USING_DEFAULT" -eq 1 ]]; then
+  echo "             (to put it somewhere else, re-run with:  --install-dir <path>)"
+fi
 
 if [[ ! -d "$INSTALL_DIR" ]]; then
-  read -rp "         Directory '${INSTALL_DIR}' does not exist. Create it? [y/N] " CREATE_DIR
-  CREATE_DIR="${CREATE_DIR:-N}"
-  if [[ "$CREATE_DIR" =~ ^[Yy]$ ]]; then
-    mkdir -p "$INSTALL_DIR"
-    success "Created directory '${INSTALL_DIR}'."
-  else
-    err "Installation cancelled."
-  fi
+  mkdir -p "$INSTALL_DIR" 2>/dev/null \
+    || sudo mkdir -p "$INSTALL_DIR" \
+    || err "Could not create '${INSTALL_DIR}'."
+  success "Created directory '${INSTALL_DIR}'."
 fi
 
 DEST="${INSTALL_DIR}/safe-claude"
-
-info "Installing to '${DEST}'..."
 
 # Use sudo only when necessary
 if [[ -w "$INSTALL_DIR" ]]; then
@@ -97,6 +140,18 @@ else
 fi
 
 success "'safe-claude' installed to '${DEST}'."
+
+# ── step 3b: record installed version ─────────────────────────────────────────
+# Store the source commit SHA so 'safe-claude update' can detect "already up to
+# date" and 'safe-claude --version' can report it. Written to the user's config
+# dir (never needs sudo).
+mkdir -p "$(dirname "$VERSION_FILE")"
+printf '%s\n' "$SHA" > "$VERSION_FILE"
+if [[ "$SHA" == "unknown" ]]; then
+  warn "Not a git checkout — recorded version as 'unknown'."
+else
+  success "Recorded version ${SHA:0:8}."
+fi
 
 # ── step 4: verify ───────────────────────────────────────────────────────────
 

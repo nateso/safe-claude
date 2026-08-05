@@ -32,6 +32,10 @@ WORKDIR /workspace
 # and it also stops Claude from leaving root-owned files in the mounted folder.
 RUN mkdir -p /home/node/.claude && chown -R node:node /home/node
 ENV HOME=/home/node
+# Claude writes its account state to ~/.claude.json, which sits *outside* the
+# ~/.claude directory that safe-claude backs with a volume. Point it inside, or
+# recreating the container drops you back into onboarding.
+ENV CLAUDE_CONFIG_DIR=/home/node/.claude
 # Anthropic's native installer puts claude in ~/.local/bin, so add it to PATH.
 ENV PATH="/home/node/.local/bin:$PATH"
 USER node
@@ -42,5 +46,11 @@ USER node
 # land in a root-owned prefix that the non-root user cannot update, causing
 # "Auto-update failed: no write permission to npm prefix".
 RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Stamp the source commit into the image so 'safe-claude list' can report which
+# version a sandbox runs. Deliberately the last instruction: a new version must
+# not invalidate the cache for the expensive layers above it.
+ARG SAFE_CLAUDE_VERSION=unknown
+LABEL org.opencontainers.image.revision="$SAFE_CLAUDE_VERSION"
 
 CMD ["bash"]

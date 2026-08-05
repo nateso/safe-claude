@@ -1,0 +1,18 @@
+# Text files default to LF — in the repository and on checkout — so the shell
+# scripts stay runnable on Linux/macOS/WSL no matter which platform the repo was
+# cloned on. git auto-detects binary files and leaves them untouched.
+* text=auto eol=lf
+
+# Shell scripts: explicit LF (safe-claude has no extension).
+safe-claude text eol=lf
+*.sh        text eol=lf
+
+# Windows scripts MUST be CRLF: Windows PowerShell 5.1 mis-parses here-strings in
+# LF-only files (this breaks install.ps1's .bat generator), and .bat/.cmd need
+# CRLF too.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files git must never normalize.
+.DS_Store binary

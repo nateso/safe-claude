@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Scratch files from local testing
+test.ps1
+test.sh
+*.tmp
+*.tmp.*
+
+# Local scratch folder. The image build never reads it -- the Dockerfile has no
+# COPY, and /workspace is created inside the image by WORKDIR.
+workspace/
