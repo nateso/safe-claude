@@ -1,0 +1,44 @@
+name: Release
+
+# Publishes the safe-claude image to GitHub Container Registry on every
+# release tag. This way users don't have to clone the repo at all.
+#
+# One-time setup after the first release: make the 'safe-claude' package
+# public (GitHub -> Packages -> safe-claude -> Package settings -> Change
+# visibility), or anonymous 'docker pull' will fail.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-image:
+    name: build and push image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # arm64 so Apple Silicon Macs get a native image instead of emulation.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            SAFE_CLAUDE_VERSION=${{ github.ref_name }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
