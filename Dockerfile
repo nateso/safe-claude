@@ -39,6 +39,12 @@ ENV CLAUDE_CONFIG_DIR=/home/node/.claude
 
 # Anthropic's native installer puts claude in ~/.local/bin, so add it to PATH.
 ENV PATH="/home/node/.local/bin:$PATH"
+
+# copy the safe-claude scripts to the image so they ship directly with the image
+# avoids pulling them later from some url when installing the script
+COPY safe-claude /opt/safe-claude/safe-claude
+COPY safe-claude.ps1 /opt/safe-claude/safe-claude.ps1
+
 USER node
 
 # Install Claude Code with Anthropic's native installer (NOT `npm install -g`).
