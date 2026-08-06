@@ -5,15 +5,14 @@ set -euo pipefail
 # install.sh — Guided installation for safe-claude
 #
 # 1. Checks prerequisites (Docker)
-# 2. Builds the 'safe-claude' Docker image
+# 2. Pull the 'safe-claude' Docker image from the GHCR
 # 3. Installs the 'safe-claude' script to a directory on your PATH
 #
 # Usage: ./install.sh [--install-dir <path>]
 # ---------------------------------------------------------------------------
 
-IMAGE_NAME="safe-claude"
+IMAGE_NAME="ghcr.io/nateso/safe-claude:latest"
 DEFAULT_INSTALL_DIR="/usr/local/bin"
-VERSION_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/safe-claude/version"
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -21,9 +20,6 @@ info()    { echo "[safe-claude] $*"; }
 success() { echo "[safe-claude] OK $*"; }
 warn()    { echo "[safe-claude] ! $*"; }
 err()     { echo "[safe-claude] Error: $*" >&2; exit 1; }
-
-# Resolve the directory that contains this script
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── options ─────────────────────────────────────────────────────────────────
 
@@ -70,48 +66,34 @@ fi
 
 success "Docker is available and running."
 
-# Resolve the source commit up front: it is stamped into the image below and
-# recorded for 'safe-claude --version' further down.
-if ! SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null); then
-  SHA="unknown"
-fi
-
-# ── step 2: build the Docker image ──────────────────────────────────────────
-
+# ── step 2: pull the Docker image ───────────────────────────────────────────
 echo ""
 if docker image inspect "$IMAGE_NAME" &>/dev/null; then
-  # Compare the image's stamped commit with this checkout. An image built from
-  # different source is the common cause of "I reinstalled but nothing changed",
-  # so recommend rebuilding in that case rather than defaulting to skip.
-  IMG_SHA="$(docker image inspect "$IMAGE_NAME" \
-      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
-  if [[ -z "$IMG_SHA" || "$IMG_SHA" == "<no value>" ]]; then IMG_SHA="unknown"; fi
-
-  if [[ "$SHA" != "unknown" && "$IMG_SHA" == "$SHA" ]]; then
-    warn "Docker image '${IMAGE_NAME}' already exists and matches this checkout (${SHA:0:8})."
-    read -rp "         Rebuild it anyway? [y/N] " REBUILD
-    REBUILD="${REBUILD:-N}"
+  # Compare the current id with the latest ID on the ghcr
+  OLD_ID=$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}')
+  info "Checking for updates..."
+  if docker pull -q "$IMAGE_NAME" >/dev/null 2>&1; then
+    NEW_ID=$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}')
+    if [[ "$OLD_ID" == "$NEW_ID" ]]; then
+      success "Image is up to date."
+    else
+      success "You were running an outdated version of the image. Updated to new version."
+    fi
   else
-    warn "Docker image '${IMAGE_NAME}' exists but was built from ${IMG_SHA:0:8}, not this checkout (${SHA:0:8})."
-    warn "Rebuilding keeps the image in step with the command being installed."
-    read -rp "         Rebuild it? [Y/n] " REBUILD
-    REBUILD="${REBUILD:-Y}"
+    warn "Could not check for updates -- check your internet connection."
+    warn "Continuing with the existing local image."
   fi
 else
-  REBUILD="y"
-fi
-
-if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
-  info "Building Docker image '${IMAGE_NAME}' (this may take a few minutes)..."
-  # --pull so a rebuild actually refreshes the base image rather than reusing a
-  # stale local copy.
-  docker build --pull --build-arg "SAFE_CLAUDE_VERSION=${SHA}" -t "$IMAGE_NAME" "$SCRIPT_DIR"
-  success "Docker image '${IMAGE_NAME}' built successfully."
-else
-  info "Skipping image build."
+  info "Pulling safe-claude image from remote (this may take a few minutes)..."
+  if docker pull "$IMAGE_NAME"; then
+    success "Image pulled successfully."
+  else
+    err "Could not pull the image. Check your internet connection."
+  fi
 fi
 
 # ── step 3: install the safe-claude script ───────────────────────────────────
+# the safe-claude script is shipped inside the docker image
 
 echo ""
 info "Installing the 'safe-claude' command to:"
@@ -129,29 +111,27 @@ fi
 
 DEST="${INSTALL_DIR}/safe-claude"
 
+info "Extracting the safe-claude script from the image..."
+CONTAINER_ID=$(docker create "$IMAGE_NAME") \
+  || err "Could not create a temporary container from '${IMAGE_NAME}'."
+
+# Ensure the temporary container is always cleaned up.
+trap "docker rm '$CONTAINER_ID' >/dev/null 2>&1" EXIT
+
 # Use sudo only when necessary
 if [[ -w "$INSTALL_DIR" ]]; then
-  cp "$SCRIPT_DIR/safe-claude" "$DEST"
+  docker cp "$CONTAINER_ID:/opt/safe-claude/safe-claude" "$DEST" \
+    || err "Could not extract the safe-claude script from the image."
   chmod +x "$DEST"
 else
   info "Directory '${INSTALL_DIR}' requires elevated permissions — running with sudo."
-  sudo cp "$SCRIPT_DIR/safe-claude" "$DEST"
+  docker cp "$CONTAINER_ID:/opt/safe-claude/safe-claude" "/tmp/safe-claude" \
+    || err "Could not extract the safe-claude script from the image."
+  sudo mv "/tmp/safe-claude" "$DEST"
   sudo chmod +x "$DEST"
 fi
 
 success "'safe-claude' installed to '${DEST}'."
-
-# ── step 3b: record installed version ─────────────────────────────────────────
-# Store the source commit SHA so 'safe-claude update' can detect "already up to
-# date" and 'safe-claude --version' can report it. Written to the user's config
-# dir (never needs sudo).
-mkdir -p "$(dirname "$VERSION_FILE")"
-printf '%s\n' "$SHA" > "$VERSION_FILE"
-if [[ "$SHA" == "unknown" ]]; then
-  warn "Not a git checkout — recorded version as 'unknown'."
-else
-  success "Recorded version ${SHA:0:8}."
-fi
 
 # ── step 4: verify ───────────────────────────────────────────────────────────
 
