@@ -112,23 +112,29 @@ fi
 DEST="${INSTALL_DIR}/safe-claude"
 
 info "Extracting the safe-claude script from the image..."
+# mktemp gives an unpredictable, user-owned path -- a fixed /tmp name would let
+# another local user pre-create the file and swap its content before it is
+# moved into the install dir.
+TMP_SCRIPT="$(mktemp)"
 CONTAINER_ID=$(docker create "$IMAGE_NAME") \
   || err "Could not create a temporary container from '${IMAGE_NAME}'."
 
-# Ensure the temporary container is always cleaned up.
-trap "docker rm '$CONTAINER_ID' >/dev/null 2>&1" EXIT
+# Ensure the temporary container and file are always cleaned up.
+trap 'docker rm "$CONTAINER_ID" >/dev/null 2>&1; rm -f "$TMP_SCRIPT"' EXIT
 
-# Use sudo only when necessary
+docker cp "$CONTAINER_ID:/opt/safe-claude/safe-claude" "$TMP_SCRIPT" \
+  || err "Could not extract the safe-claude script from the image."
+chmod 755 "$TMP_SCRIPT"
+
+# Stage next to the destination, then rename: same filesystem, atomic, and it
+# never truncates $DEST in place -- which may be the very script running us
+# when invoked via 'safe-claude update'.
+STAGED="${INSTALL_DIR}/.safe-claude.tmp.$$"
 if [[ -w "$INSTALL_DIR" ]]; then
-  docker cp "$CONTAINER_ID:/opt/safe-claude/safe-claude" "$DEST" \
-    || err "Could not extract the safe-claude script from the image."
-  chmod +x "$DEST"
+  cp "$TMP_SCRIPT" "$STAGED" && mv -f "$STAGED" "$DEST"
 else
   info "Directory '${INSTALL_DIR}' requires elevated permissions — running with sudo."
-  docker cp "$CONTAINER_ID:/opt/safe-claude/safe-claude" "/tmp/safe-claude" \
-    || err "Could not extract the safe-claude script from the image."
-  sudo mv "/tmp/safe-claude" "$DEST"
-  sudo chmod +x "$DEST"
+  sudo cp "$TMP_SCRIPT" "$STAGED" && sudo mv -f "$STAGED" "$DEST"
 fi
 
 success "'safe-claude' installed to '${DEST}'."

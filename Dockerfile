@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a venv and add it to PATH so python/pip always resolve to it
-RUN python3 -m venv /opt/venv
+RUN python3 -m venv /opt/venv && chown -R node:node /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # set the working directory

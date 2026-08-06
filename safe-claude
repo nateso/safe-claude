@@ -134,8 +134,21 @@ cmd_update() {
   local old_id=""
   old_id=$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}' 2>/dev/null || true)
 
-  # just call the installation script from the web (the domain should be stable!)
-  bash -c "$(curl -fsSL "$INSTALL_SCRIPT_URL")"
+  # Fetch the installation script from the web (the domain should be stable!).
+  # Download first and check it: a failed curl inside 'bash -c "$(...)"' would
+  # expand to 'bash -c ""' and make the update a silent no-op.
+  local installer
+  installer="$(curl -fsSL "$INSTALL_SCRIPT_URL")" \
+    || err "Could not download the installer from ${INSTALL_SCRIPT_URL}. Check your internet connection."
+  [[ -n "$installer" ]] || err "Downloaded installer is empty — aborting."
+
+  # Reinstall into the directory the current command lives in, so a custom
+  # --install-dir install is updated in place instead of leaving a stale copy
+  # shadowing a fresh one in the default location.
+  local self install_args=()
+  self="$(command -v safe-claude 2>/dev/null || true)"
+  [[ -n "$self" ]] && install_args=(--install-dir "$(dirname "$self")")
+  bash -c "$installer" install.sh ${install_args[@]+"${install_args[@]}"}
 
   # Report existing sandboxes; do NOT recreate them.
   local new_id=""
@@ -302,19 +315,38 @@ cmd_migrate() {
 
   local container
   container="$(container_name_for_path "$abs")"
+  local volume="${container}-claude"
 
   docker container inspect "$container" &>/dev/null \
     || err "No sandbox exists for ${abs}. Nothing to migrate."
 
-  # Copy .claude from the container to the host if not already there.
-  if [[ ! -d "${abs}/.safe-claude" ]]; then
-    info "Copying Claude config from container to ${abs}/.safe-claude ..."
-    mkdir -p "${abs}/.safe-claude"
-    docker cp "$container:/home/node/.claude/." "${abs}/.safe-claude/" \
-      || warn "Could not copy .claude from the container (it may be empty)."
-    success "Config copied."
+  # Check if .claude is already on a named volume.
+  local has_volume
+  has_volume="$(docker inspect --format \
+    '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Name}}{{end}}{{end}}' \
+    "$container" 2>/dev/null || true)"
+
+  # Old containers store .claude in the writable layer — copy it out before
+  # destroying the container, then seed a named volume with it.
+  local tmp=""
+  if [[ -z "$has_volume" || "$has_volume" == "<no value>" ]]; then
+    tmp="$(mktemp -d)"
+    trap "rm -rf '$tmp'" EXIT
+
+    info "Old container has no volume — saving Claude config..."
+    if docker cp "$container:/home/node/.claude/." "$tmp/claude/"; then
+      success "Config saved."
+    else
+      warn "Could not copy Claude config from the old container."
+      warn "Continuing will recreate the sandbox WITHOUT your login and history."
+      if ! confirm "Continue anyway?"; then
+        err "Migration aborted. The old container was left untouched."
+      fi
+      tmp=""
+    fi
   else
-    info ".safe-claude already exists — nothing to copy."
+    volume="$has_volume"
+    info "Container already uses volume '${volume}' — config will persist automatically."
   fi
 
   info "Removing old container..."
@@ -326,9 +358,20 @@ cmd_migrate() {
     --label "safe-claude.path=${abs}" \
     --label "safe-claude.version=$(image_version)" \
     -v "${abs}:/workspace" \
-    -v "${abs}/.safe-claude:/home/node/.claude" \
+    -v "${volume}:/home/node/.claude" \
     "$IMAGE_NAME" \
     > /dev/null
+
+  # Seed the new volume from the saved config.
+  if [[ -n "$tmp" && -d "$tmp/claude" ]]; then
+    info "Restoring Claude config into new container..."
+    docker cp "$tmp/claude/." "$container:/home/node/.claude/" \
+      || warn "Could not restore config — you may need to log in again."
+    docker exec -u 0 "$container" sh -c \
+      'chown -R 1000:1000 /home/node/.claude && chmod -R go-rwx /home/node/.claude' \
+      || true
+    success "Config restored."
+  fi
 
   success "Sandbox migrated. Enter it with:  safe-claude ${patharg}"
 }
@@ -362,12 +405,15 @@ cmd_remove() {
   success "Sandbox removed."
   echo "  Your project files in ${abs} are untouched."
 
-  if [[ -d "${abs}/.safe-claude" ]]; then
-    if confirm "Also delete ${abs}/.safe-claude (credentials, history, settings)?"; then
-      rm -rf "${abs}/.safe-claude"
+  local volume="${container}-claude"
+  if docker volume inspect "$volume" &>/dev/null; then
+    if confirm "Also delete the '${volume}' volume (credentials, history, settings)?"; then
+      docker volume rm "$volume" >/dev/null
       success "Claude config removed."
     else
-      info "Kept ${abs}/.safe-claude"
+      info "Kept volume '${volume}'."
+      echo "  List volumes:    docker volume ls"
+      echo "  Remove it later: docker volume rm ${volume}"
     fi
   fi
 }
@@ -412,16 +458,13 @@ if ! docker container inspect "$CONTAINER" &>/dev/null; then
   # claude settings are stored in <path_to_folder>/.safe-claude so Claude's login and
   # session history survive container recreation (e.g. 'safe-claude migrate').
   echo "No container found for this folder. Creating '${CONTAINER}'..."
-  # if it does not exist yet, create a .safe-claude directory inside the volume
-  # claude will save all of its credentials etc there '
-  mkdir -p "${ABS_PATH}/.safe-claude"
   # run the docker container
   docker run -dit \
     --name "$CONTAINER" \
     --label "safe-claude.path=${ABS_PATH}" \
     --label "safe-claude.version=$(image_version)" \
     -v "${ABS_PATH}:/workspace" \
-    -v "${ABS_PATH}/.safe-claude:/home/node/.claude" \
+    -v "${CONTAINER}-claude:/home/node/.claude" \
     "$IMAGE_NAME" \
     > /dev/null
   echo "Container created."
