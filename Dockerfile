@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # install system dependencies
 # 1. Core utilities (it etc)
@@ -36,6 +36,7 @@ ENV HOME=/home/node
 # ~/.claude directory that safe-claude backs with a volume. Point it inside, or
 # recreating the container drops you back into onboarding.
 ENV CLAUDE_CONFIG_DIR=/home/node/.claude
+
 # Anthropic's native installer puts claude in ~/.local/bin, so add it to PATH.
 ENV PATH="/home/node/.local/bin:$PATH"
 USER node
