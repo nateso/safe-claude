@@ -20,7 +20,6 @@ REPO="nateso/safe-claude"
 
 # Unstamped copy (run from a repo checkout, not a release) -> dev fallback.
 if [[ "$VERSION" == @*@ ]]; then
-  DEV_MODE=1
   VERSION="dev"
   IMAGE_NAME="ghcr.io/${REPO}:latest"
 fi
