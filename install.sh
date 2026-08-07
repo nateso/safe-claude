@@ -5,13 +5,17 @@ set -euo pipefail
 # install.sh — Guided installation for safe-claude
 #
 # 1. Checks prerequisites (Docker)
-# 2. Pull the 'safe-claude' Docker image from the GHCR
+# 2. Pulls the pinned 'safe-claude' Docker image from GHCR
 # 3. Installs the 'safe-claude' script to a directory on your PATH
 #
 # Usage: ./install.sh [--install-dir <path>]
 # ---------------------------------------------------------------------------
 
-IMAGE_NAME="ghcr.io/nateso/safe-claude:latest"
+# Stamped by CI at release time.
+VERSION="@VERSION@"
+IMAGE_NAME="@IMAGE_DIGEST@"      # ghcr.io/nateso/safe-claude@sha256:...
+REPO="nateso/safe-claude"
+
 DEFAULT_INSTALL_DIR="/usr/local/bin"
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -21,19 +25,31 @@ success() { echo "[safe-claude] OK $*"; }
 warn()    { echo "[safe-claude] ! $*"; }
 err()     { echo "[safe-claude] Error: $*" >&2; exit 1; }
 
+# Unstamped copy (run from a repo checkout, not a release) -> dev fallback.
+DEV_MODE=0
+if [[ "$VERSION" == @*@ ]]; then
+  DEV_MODE=1
+  VERSION="dev"
+  IMAGE_NAME="ghcr.io/${REPO}:latest"
+fi
+
 # ── options ─────────────────────────────────────────────────────────────────
 
 INSTALL_DIR="${INSTALL_DIR:-}"
+ASSUME_YES="${ASSUME_YES:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir)   INSTALL_DIR="${2:-}"; [[ -n "$INSTALL_DIR" ]] || err "--install-dir needs a path"; shift 2 ;;
     --install-dir=*) INSTALL_DIR="${1#*=}"; shift ;;
+    -y|--yes)        ASSUME_YES=1; shift ;;
     -h|--help)
-      echo "Usage: ./install.sh [--install-dir <path>]"
+      echo "Usage: ./install.sh [--install-dir <path>] [--yes]"
       echo ""
       echo "  --install-dir <path>  Where to put the 'safe-claude' command."
       echo "                        Default: ${DEFAULT_INSTALL_DIR}"
+      echo "  -y, --yes             Do not prompt before reinstalling over an"
+      echo "                        existing copy. Same as ASSUME_YES=1."
       exit 0
       ;;
     *) err "Unknown option: $1 (try --help)" ;;
@@ -51,7 +67,7 @@ INSTALL_DIR="${INSTALL_DIR%/}"
 
 echo ""
 echo "==========================================="
-echo "  safe-claude installer"
+echo "  safe-claude installer (${VERSION})"
 echo "==========================================="
 echo ""
 
@@ -63,37 +79,56 @@ command -v docker &>/dev/null \
 if ! docker info &>/dev/null; then
   err "Docker daemon is not running. Please start Docker and re-run this script."
 fi
-
 success "Docker is available and running."
 
-# ── step 2: pull the Docker image ───────────────────────────────────────────
-echo ""
-if docker image inspect "$IMAGE_NAME" &>/dev/null; then
-  # Compare the current id with the latest ID on the ghcr
-  OLD_ID=$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}')
-  info "Checking for updates..."
-  if docker pull -q "$IMAGE_NAME" >/dev/null 2>&1; then
-    NEW_ID=$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}')
-    if [[ "$OLD_ID" == "$NEW_ID" ]]; then
-      success "Image is up to date."
-    else
-      success "You were running an outdated version of the image. Updated to new version."
-    fi
-  else
-    warn "Could not check for updates -- check your internet connection."
-    warn "Continuing with the existing local image."
+# check whether in DEV mode
+[[ "$DEV_MODE" -eq 1 ]] && warn "Unstamped development copy -- using ':latest' and the repo checkout."
+
+
+# --- Check existing installation of safe-claude -----------------------------
+# --- Check existing installation of safe-claude -----------------------------
+EXISTING="$(command -v safe-claude 2>/dev/null || true)"
+if [[ -n "$EXISTING" ]]; then
+  EXISTING_VERSION="$("$EXISTING" --version 2>/dev/null || echo "unknown")"
+  echo ""
+  warn "safe-claude is already installed at ${EXISTING} (version: ${EXISTING_VERSION})"
+
+  if [[ "$EXISTING" != "${INSTALL_DIR}/safe-claude" && "$USING_DEFAULT" -eq 1 ]]; then
+    info "Reinstalling over the existing location."
+    INSTALL_DIR="$(dirname "$EXISTING")"
   fi
-else
-  info "Pulling safe-claude image from remote (this may take a few minutes)..."
-  if docker pull "$IMAGE_NAME"; then
-    success "Image pulled successfully."
-  else
-    err "Could not pull the image. Check your internet connection."
+
+  if [[ "$ASSUME_YES" -ne 1 ]]; then
+    if [[ -r /dev/tty ]]; then
+      read -r -p "[safe-claude] Reinstall ${VERSION} to '${INSTALL_DIR}'? [y/N] " REPLY < /dev/tty
+      [[ "$REPLY" =~ ^[Yy]$ ]] || { info "Aborted -- nothing was changed."; exit 0; }
+    else
+      info "No terminal available -- proceeding with reinstall."
+    fi
   fi
 fi
 
-# ── step 3: install the safe-claude script ───────────────────────────────────
-# the safe-claude script is shipped inside the docker image
+
+# ── step 2: pull the Docker image ───────────────────────────────────────────
+
+echo ""
+if [[ "$DEV_MODE" -eq 0 ]] && docker image inspect "$IMAGE_NAME" &>/dev/null; then
+  # A digest reference is immutable: present locally == correct. Nothing to check.
+  success "Image for ${VERSION} is already present locally."
+else
+  info "Pulling safe-claude image for ${VERSION} (this may take a few minutes)..."
+  if docker pull "$IMAGE_NAME"; then
+    success "Image pulled successfully."
+    # Digest pulls show up as <none> in 'docker images'; give it a readable tag.
+    [[ "$DEV_MODE" -eq 0 ]] && docker tag "$IMAGE_NAME" "ghcr.io/${REPO}:${VERSION}"
+  else
+    err "Could not pull the image. Check your internet connection, and that
+             the 'safe-claude' package on GHCR is public."
+  fi
+fi
+
+# ── step 3: install the safe-claude script ──────────────────────────────────
+# The script is a release asset from the same release as this installer.
 
 echo ""
 info "Installing the 'safe-claude' command to:"
@@ -111,39 +146,51 @@ fi
 
 DEST="${INSTALL_DIR}/safe-claude"
 
-info "Extracting the safe-claude script from the image..."
 # mktemp gives an unpredictable, user-owned path -- a fixed /tmp name would let
 # another local user pre-create the file and swap its content before it is
 # moved into the install dir.
 TMP_SCRIPT="$(mktemp)"
-CONTAINER_ID=$(docker create "$IMAGE_NAME") \
-  || err "Could not create a temporary container from '${IMAGE_NAME}'."
+STAGED="${INSTALL_DIR}/.safe-claude.tmp.$$"
+trap 'rm -f "$TMP_SCRIPT"; rm -f "$STAGED" 2>/dev/null || sudo rm -f "$STAGED" 2>/dev/null || true' EXIT
 
-# Ensure the temporary container and file are always cleaned up.
-trap 'docker rm "$CONTAINER_ID" >/dev/null 2>&1; rm -f "$TMP_SCRIPT"' EXIT
+if [[ "$DEV_MODE" -eq 1 ]]; then
+  # Dev: use the copy sitting next to this installer in the checkout.
+  SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  [[ -f "$SRC_DIR/safe-claude" ]] || err "Dev mode: no 'safe-claude' next to install.sh."
+  cp "$SRC_DIR/safe-claude" "$TMP_SCRIPT"
+else
+  info "Downloading the safe-claude script (${VERSION})..."
+  curl -fsSL -o "$TMP_SCRIPT" \
+    "https://github.com/${REPO}/releases/download/${VERSION}/safe-claude" \
+    || err "Could not download the safe-claude script for ${VERSION}."
+fi
 
-docker cp "$CONTAINER_ID:/opt/safe-claude/safe-claude" "$TMP_SCRIPT" \
-  || err "Could not extract the safe-claude script from the image."
-chmod 755 "$TMP_SCRIPT"
+# Sanity checks: non-empty, looks like a bash script, parses.
+[[ -s "$TMP_SCRIPT" ]] || err "Downloaded script is empty."
+head -c 100 "$TMP_SCRIPT" | grep -q '^#!' || err "Downloaded file is not a script."
+bash -n "$TMP_SCRIPT" || err "Downloaded script fails a syntax check."
 
 # Stage next to the destination, then rename: same filesystem, atomic, and it
 # never truncates $DEST in place -- which may be the very script running us
 # when invoked via 'safe-claude update'.
-STAGED="${INSTALL_DIR}/.safe-claude.tmp.$$"
 if [[ -w "$INSTALL_DIR" ]]; then
-  cp "$TMP_SCRIPT" "$STAGED" && mv -f "$STAGED" "$DEST"
+  install -m 755 "$TMP_SCRIPT" "$STAGED" && mv -f "$STAGED" "$DEST"
 else
   info "Directory '${INSTALL_DIR}' requires elevated permissions — running with sudo."
-  sudo cp "$TMP_SCRIPT" "$STAGED" && sudo mv -f "$STAGED" "$DEST"
+  sudo install -m 755 "$TMP_SCRIPT" "$STAGED" && sudo mv -f "$STAGED" "$DEST"
 fi
 
-success "'safe-claude' installed to '${DEST}'."
+success "'safe-claude' ${VERSION} installed to '${DEST}'."
 
 # ── step 4: verify ───────────────────────────────────────────────────────────
 
 echo ""
-if command -v safe-claude &>/dev/null; then
+FOUND="$(command -v safe-claude 2>/dev/null || true)"
+if [[ "$FOUND" == "$DEST" ]]; then
   success "Installation verified — 'safe-claude' is on your PATH."
+elif [[ -n "$FOUND" ]]; then
+  warn "Another copy at '${FOUND}' shadows the one just installed to '${DEST}'."
+  warn "Remove it, or re-run with:  --install-dir $(dirname "$FOUND")"
 else
   warn "'${INSTALL_DIR}' does not appear to be on your PATH."
   warn "Add the following line to your shell config (~/.zshrc or ~/.bashrc):"
@@ -154,20 +201,3 @@ else
 fi
 
 # ── done ─────────────────────────────────────────────────────────────────────
-
-echo ""
-echo "==========================================="
-echo "  All done!"
-echo "==========================================="
-echo ""
-echo "  Usage:"
-echo ""
-echo "    safe-claude /path/to/your/project"
-echo ""
-echo "  This will create a sandboxed Docker container for that folder"
-echo "  (if one doesn't exist yet) and launch Claude Code."
-echo ""
-echo "  Add --dangerously-skip-permissions to run Claude without prompts:"
-echo ""
-echo "    safe-claude /path/to/your/project --dangerously-skip-permissions"
-echo ""

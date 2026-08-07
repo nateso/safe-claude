@@ -13,8 +13,17 @@ set -euo pipefail
 # /workspace and has Claude Code pre-installed.
 # ---------------------------------------------------------------------------
 
-IMAGE_NAME="ghcr.io/nateso/safe-claude:latest"
-INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/nateso/safe-claude/main/install.sh"
+# Stamped by CI at release time.
+VERSION="@VERSION@"
+IMAGE_NAME="@IMAGE_DIGEST@"      # ghcr.io/nateso/safe-claude@sha256:...
+REPO="nateso/safe-claude"
+
+DEV_MODE=0
+if [[ "$VERSION" == @*@ ]]; then
+  DEV_MODE=1
+  VERSION="dev"
+  IMAGE_NAME="ghcr.io/${REPO}:latest"
+fi
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -34,7 +43,7 @@ usage() {
   echo ""
   echo ""
   echo "  First install the safe-claude command via: "
-  echo '      bash -c "$(curl -fsSL https://raw.githubusercontent.com/nateso/safe-claude/main/install.sh)"'
+  echo '      curl -fsSL https://github.com/nateso/safe-claude/releases/latest/download/install.sh | bash'
 }
 
 err() {
@@ -119,70 +128,93 @@ sandbox_names() {
 
 # ── version tracking ────────────────────────────────────────────────────────
 print_version() {
-  require_docker
   echo "safe-claude $(image_version)"
 }
 
 # ── update ──────────────────────────────────────────────────────────────────
 
 cmd_update() {
+  # Reject stray arguments rather than silently ignoring them: 'update' takes
+  # none, and a typo'd flag must not fall through into a live self-install.
+  case "${1:-}" in
+    -*) err "Unknown option for 'update': $1" ;;
+  esac
+  [[ $# -eq 0 ]] || err "'update' takes no arguments (got: $1)"
+
   echo "safe-claude update"
-  echo "  Pulls the latest image and updates the 'safe-claude' command."
+  echo "  Fetches the latest release and reinstalls the command + image."
   echo "  Existing sandboxes are left untouched."
   echo ""
 
-  local old_id=""
-  old_id=$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}' 2>/dev/null || true)
+  require_docker
 
-  # Fetch the installation script from the web (the domain should be stable!).
-  # Download first and check it: a failed curl inside 'bash -c "$(...)"' would
-  # expand to 'bash -c ""' and make the update a silent no-op.
+  latest_release_url="https://github.com/${REPO}/releases/latest"
+
+  local latest
+  latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_release_url" | sed 's|.*/tag/||')
+
+  [[ -n "$latest" && "$latest" != *"/releases"* ]] || err "Could not determine the latest release. Check your connection."
+
+  if [[ "$VERSION" == "$latest" ]]; then
+    success "Already up to date (${VERSION})."
+    return 0
+  fi
+  info "Updating ${VERSION} -> ${latest}..."
+
   local installer
-  installer="$(curl -fsSL "$INSTALL_SCRIPT_URL")" \
-    || err "Could not download the installer from ${INSTALL_SCRIPT_URL}. Check your internet connection."
-  [[ -n "$installer" ]] || err "Downloaded installer is empty — aborting."
+  installer="$(mktemp)"
+  trap 'rm -f "$installer"' RETURN
 
-  # Reinstall into the directory the current command lives in, so a custom
-  # --install-dir install is updated in place instead of leaving a stale copy
-  # shadowing a fresh one in the default location.
-  local self install_args=()
-  self="$(command -v safe-claude 2>/dev/null || true)"
-  [[ -n "$self" ]] && install_args=(--install-dir "$(dirname "$self")")
-  bash -c "$installer" install.sh ${install_args[@]+"${install_args[@]}"}
+  # fetch the latest installer script
+  curl -fsSL -o "$installer" \
+    "https://github.com/${REPO}/releases/download/${latest}/install.sh" || err "Could not download the installer for ${latest}."
+  [[ -s "$installer" ]] || err "Downloaded installer is empty."
 
-  # Report existing sandboxes; do NOT recreate them.
-  local new_id=""
-  new_id=$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}' 2>/dev/null || true)
+  # reinstall the command to the directory in which it currently lives
+  local self
+  self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+  # ASSUME_YES rather than --yes: this has to drive whichever installer the
+  # target release happens to ship, and the --yes flag only exists from this
+  # release onward. An installer that predates it ignores the variable and
+  # prompts; one that predates *both* would abort on the unknown flag.
+  ASSUME_YES=1 bash "$installer" --install-dir "$(dirname "$self")" \
+    || err "Installation of ${latest} failed."
 
-  if [[ -n "$old_id" && "$old_id" != "$new_id" ]]; then
-    # Find sandboxes running the old image.
-    local stale_paths=()
-    local names
-    names="$(sandbox_names)"
-    [[ -n "$names" ]] || return 0
+  # The installer tagged the new image as :<latest>; use that to find stale sandboxes.
+  local new_id
+  new_id="$(docker image inspect "ghcr.io/${REPO}:${latest}" --format '{{.Id}}' 2>/dev/null || true)"
+  [[ -n "$new_id" ]] || { warn "Could not identify the new image; skipping sandbox check."; return 0; }
 
-    local tmpl='{{.Image}}|{{index .Config.Labels "safe-claude.path"}}'
-    while IFS='|' read -r img path; do
-      [[ -n "$img" ]] || continue
-      if [[ "$img" != "$new_id" && -n "$path" && "$path" != "<no value>" ]]; then
-        stale_paths+=("$path")
-      fi
-    done < <(docker inspect --format "$tmpl" $names 2>/dev/null || true)
+  local names
+  names="$(sandbox_names)"
+  [[ -n "$names" ]] || return 0
 
-    if [[ ${#stale_paths[@]} -gt 0 ]]; then
-      echo ""
-      warn "${#stale_paths[@]} sandbox(es) still run the previous image."
-      if confirm "Migrate all of them to the new image now?"; then
-        for path in "${stale_paths[@]}"; do
-          echo ""
-          cmd_migrate "$path"
-        done
-      else
-        echo "  You can migrate them individually later with:"
-        echo "      safe-claude migrate <path_to_folder>"
-      fi
+  local stale_paths=() img path
+  local tmpl='{{.Image}}|{{index .Config.Labels "safe-claude.path"}}'
+  while IFS='|' read -r img path; do
+    [[ -n "$img" ]] || continue
+    if [[ "$img" != "$new_id" && -n "$path" && "$path" != "<no value>" ]]; then
+      stale_paths+=("$path")
+    fi
+  done < <(docker inspect --format "$tmpl" $names 2>/dev/null || true)
+
+
+  if [[ ${#stale_paths[@]} -gt 0 ]]; then
+    echo ""
+    warn "${#stale_paths[@]} sandbox(es) still run an older image."
+    if confirm "Migrate all of them to the new image now?"; then
+      local p
+      for p in "${stale_paths[@]}"; do
+        echo ""
+        "$self" migrate "$p"
+      done
+    else
+      echo "  You can migrate them individually later with:"
+      echo "      safe-claude migrate <path_to_folder>"
     fi
   fi
+  echo ""
+  success "Restart your shell or re-run 'safe-claude' to use ${latest}."
 }
 
 # ── list ─────────────────────────────────────────────────────────────────────
