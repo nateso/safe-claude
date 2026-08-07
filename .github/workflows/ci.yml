@@ -48,11 +48,11 @@ jobs:
           check 'help'                 0 'Usage:'                     -- help
           check 'no args'              1 'Usage:'                     --
           check 'missing folder'       1 'Path does not exist'        -- /definitely/not/here
-          check 'rebuild, no path'     1 'Usage: safe-claude rebuild' -- rebuild
-          check 'rebuild, two paths'   1 'unexpected extra argument'  -- rebuild /tmp /etc
+          check 'migrate, no path'     1 'Usage: safe-claude migrate' -- migrate
+          check 'migrate, two paths'   1 'unexpected extra argument'  -- migrate /tmp /etc
+          check 'remove, no path'      1 'Usage: safe-claude remove'  -- remove
           check 'update, bad flag'     1 'Unknown option'             -- update --bogus
           check 'list, bad arg'        1 'takes no arguments'         -- list --bogus
-          check 'rebuild --no-backup'  1 'Usage: safe-claude rebuild' -- rebuild --no-backup
           # The runner has Docker but no safe-claude containers.
           check 'list, no sandboxes'   0 'No sandboxes yet'           -- list
 
@@ -118,14 +118,13 @@ jobs:
               @{ Name = 'help';               Args = @('help');             Code = 0; Want = 'Usage:' }
               @{ Name = 'no args';            Args = @();                   Code = 1; Want = 'Usage:' }
               @{ Name = 'missing folder';     Args = @('X:\nope\nope');     Code = 1; Want = 'Path does not exist' }
-              @{ Name = 'rebuild, no path';   Args = @('rebuild');          Code = 1; Want = 'Usage: safe-claude rebuild' }
-              @{ Name = 'rebuild -y';         Args = @('rebuild', '-y');    Code = 1; Want = 'Usage: safe-claude rebuild'; Avoid = 'Unknown option' }
+              @{ Name = 'migrate, no path';   Args = @('migrate');          Code = 1; Want = 'Usage: safe-claude migrate' }
+              @{ Name = 'migrate, two paths'; Args = @('migrate', 'C:\', 'C:\Windows'); Code = 1; Want = 'unexpected extra argument' }
+              @{ Name = 'remove, no path';    Args = @('remove');           Code = 1; Want = 'Usage: safe-claude remove' }
               @{ Name = 'update, bad flag';   Args = @('update', '--bogus');Code = 1; Want = 'Unknown option' }
               # Not testing bare 'list' here: the Windows runner's Docker is in
               # Windows-container mode, so `docker info` is not dependable.
               @{ Name = 'list, bad arg';      Args = @('list', '--bogus');  Code = 1; Want = 'takes no arguments' }
-              # --no-backup must be accepted, not rejected as an unknown option.
-              @{ Name = 'rebuild --no-backup'; Args = @('rebuild', '--no-backup'); Code = 1; Want = 'Usage: safe-claude rebuild'; Avoid = 'Unknown option' }
           )
 
           $fail = $false
@@ -187,10 +186,10 @@ jobs:
       - name: Declared parameters
         shell: pwsh
         run: |
-          # -y / --force / --version / -v must stay declared parameters: that is
+          # --version / -v / --help / -h must stay declared parameters: that is
           # what keeps them working across both shells.
           $p = (Get-Command .\safe-claude.ps1).Parameters
-          $want = @{ Yes = 'y'; Force = $null; Version = 'v'; Help = 'h' }
+          $want = @{ Version = 'v'; Help = 'h' }
           $fail = $false
           foreach ($name in $want.Keys) {
               if (-not $p.ContainsKey($name)) { Write-Host "  FAIL -$name is not declared"; $fail = $true; continue }
