@@ -18,7 +18,7 @@ VERSION="@VERSION@"
 IMAGE_NAME="@IMAGE_DIGEST@"      # ghcr.io/nateso/safe-claude@sha256:...
 REPO="nateso/safe-claude"
 
-DEV_MODE=0
+# Unstamped copy (run from a repo checkout, not a release) -> dev fallback.
 if [[ "$VERSION" == @*@ ]]; then
   DEV_MODE=1
   VERSION="dev"
