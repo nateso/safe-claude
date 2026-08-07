@@ -5,49 +5,31 @@
 
 .DESCRIPTION
     safe-claude.ps1 <path_to_folder> [claude-args...]   Enter/create a sandbox
-    safe-claude.ps1 update [-y] [--force]               Update tool + image to latest main
+    safe-claude.ps1 update                              Update tool + image to latest release
     safe-claude.ps1 list                                Show every sandbox and its state
-    safe-claude.ps1 rebuild <path_to_folder> [-y]       Move a sandbox onto the new image
+    safe-claude.ps1 migrate <path_to_folder>            Move a sandbox onto the new image
+    safe-claude.ps1 remove <path_to_folder>             Remove a sandbox (keeps your files)
     safe-claude.ps1 --version                           Print the installed version
 
     Entering a folder resolves it to an absolute path, derives a stable
     container name, creates the container if needed (with a persistent volume
     for Claude's login/history), starts it, and drops you into Claude Code.
 
-    Run install.ps1 first to build the 'safe-claude' Docker image.
+    Run install.ps1 first to pull the 'safe-claude' Docker image.
 
 .PARAMETER FolderPath
     Path to the folder you want Claude to work in, OR a subcommand
-    ('update', 'rebuild', '--version').
+    ('update', 'list', 'migrate', 'remove', '--version').
 #>
 
 param(
     [Parameter(Position = 0)]
     [string]$FolderPath,
 
-    # Declared explicitly rather than being fished out of $ClaudeArgs. The binder
-    # reads a token like '-y' as a parameter name first; on PowerShell 7 an
-    # unmatched one does fall through to the ValueFromRemainingArguments
-    # parameter, but that is incidental, and the .bat wrapper invokes Windows
-    # PowerShell 5.1. Declaring these removes the ambiguity. The subcommands
-    # still accept '-y'/'--yes'/'--force' as plain strings, so both routes work.
-    #
-    # Trade-off: '-y' and '-Force' are now consumed by this script and no longer
-    # forwarded to 'claude'. Claude Code has no such flags, so nothing is lost.
-    [Alias('y')]
-    [switch]$Yes,
-
-    [switch]$Force,
-
-    # No alias: PowerShell matches aliases case-insensitively, so 'nobackup'
-    # would collide with the parameter's own name. '--no-backup' is accepted as
-    # a plain string by the subcommand instead.
-    [switch]$NoBackup,
-
-    # Likewise for the version/help flags, which were previously matched against
-    # $FolderPath and therefore never fired: PowerShell binds '--version' to a
-    # parameter rather than passing it positionally, and swallows '-v' as a
-    # prefix of the common -Verbose parameter. An explicit alias reclaims '-v'.
+    # Declared explicitly rather than being fished out of $ClaudeArgs: PowerShell
+    # matches these against parameter names first, so without a declaration
+    # '--version' binds to nothing useful and '-v' is swallowed as a prefix of
+    # the common -Verbose parameter. An explicit alias reclaims '-v'.
     [Alias('v')]
     [switch]$Version,
 
@@ -58,9 +40,15 @@ param(
     [string[]]$ClaudeArgs
 )
 
-$IMAGE_NAME   = "safe-claude"
-$REPO_URL     = if ($env:SAFE_CLAUDE_REPO) { $env:SAFE_CLAUDE_REPO } else { "https://github.com/nateso/safe-claude.git" }
-$VERSION_FILE = Join-Path $env:LOCALAPPDATA "safe-claude\version"
+# Stamped by CI at release time.
+$VERSION    = '@VERSION@'
+$IMAGE_NAME = '@IMAGE_DIGEST@'      # ghcr.io/nateso/safe-claude@sha256:...
+$REPO       = 'nateso/safe-claude'
+
+if ($VERSION -like '@*@') {
+    $VERSION    = 'dev'
+    $IMAGE_NAME = "ghcr.io/${REPO}:latest"
+}
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -72,21 +60,23 @@ function Write-Err     { param([string]$m) Write-Host "Error: $m" -ForegroundCol
 function Show-Usage {
     Write-Host "Usage:"
     Write-Host "  safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox for a folder"
-    Write-Host "  safe-claude update [-y] [--force]               Update the tool + image to latest main"
+    Write-Host "  safe-claude update                              Update the tool + image to the latest release"
     Write-Host "  safe-claude list                                Show every sandbox and its state"
-    Write-Host "  safe-claude rebuild <path_to_folder> [-y]       Move an existing sandbox onto the new image"
-    Write-Host "                                                  (--no-backup: proceed if the backup fails)"
+    Write-Host "  safe-claude migrate <path_to_folder>            Move an existing sandbox onto the new image"
+    Write-Host "  safe-claude remove <path_to_folder>             Remove a sandbox (keeps your files)"
     Write-Host "  safe-claude --version                           Print the installed version"
     Write-Host ""
-    Write-Host "  Extra arguments are forwarded to 'claude', e.g.:"
+    Write-Host "  Entering a folder creates its container if it does not exist yet and"
+    Write-Host "  launches Claude Code. Any extra arguments are forwarded to 'claude', e.g.:"
+    Write-Host ""
     Write-Host "    safe-claude C:\project --dangerously-skip-permissions"
     Write-Host ""
-    Write-Host "  'update --force' also rebuilds the image with the Docker layer cache"
-    Write-Host "  disabled, forcing a fresh Claude Code install into it."
     Write-Host ""
-    Write-Host "  Run install.ps1 first to build the '$IMAGE_NAME' Docker image."
+    Write-Host "  First install the safe-claude command via: "
+    Write-Host "      irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex"
 }
 
+# Ask a yes/no question; returns $true for yes. Default is No.
 function Confirm-Action {
     param([string]$Prompt)
     $reply = Read-Host "$Prompt [y/N]"
@@ -97,7 +87,7 @@ function Confirm-Action {
 # separator, lowercased. Windows paths are case-insensitive and PowerShell's
 # tab-completion appends a trailing '\', so without this the same folder can
 # hash to several different container names -- meaning several sandboxes for one
-# project, and a 'rebuild C:\proj\' that reports no sandbox exists.
+# project, and a 'migrate C:\proj\' that reports no sandbox exists.
 function Get-NormalizedPath {
     param([string]$Path)
     $full = (Get-Item -LiteralPath $Path -ErrorAction Stop).FullName
@@ -143,14 +133,15 @@ function Resolve-ContainerName {
         return $legacy
     }
     # Its '<old-name>-claude' volume keeps its original name and stays mounted.
-    # Nothing recomputes that name: 'rebuild' reads the container's actual mounts.
+    # Nothing recomputes that name: 'migrate' and 'remove' read the container's
+    # actual mounts.
     Write-Success "Sandbox renamed to '$name'."
     return $name
 }
 
 function Get-VolumeName { param([string]$ContainerName) return "$ContainerName-claude" }
 
-# Source commit stamped into the current image by the Dockerfile LABEL.
+# Version tag stamped into the current image by the Dockerfile's LABEL.
 # Returns "unknown" for images built without the build-arg.
 function Get-ImageVersion {
     $img = Invoke-DockerInspect -Names @($IMAGE_NAME) -Image
@@ -187,6 +178,7 @@ function Get-LabelValue {
 function Invoke-DockerInspect {
     param([string[]]$Names, [switch]$Image)
 
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return @() }
     $json = if ($Image) { docker image inspect @Names 2>$null } else { docker inspect @Names 2>$null }
     if ($LASTEXITCODE -ne 0 -or -not $json) { return @() }
     try { return @($json | ConvertFrom-Json) } catch { return @() }
@@ -198,14 +190,27 @@ function Get-MountAt {
     return ($Container.Mounts | Where-Object { $_.Destination -eq $Destination } | Select-Object -First 1)
 }
 
+# Name of the volume mounted at /home/node/.claude in a container, or ''.
+function Get-ClaudeVolumeOf {
+    param([string]$ContainerName)
+    $info = Invoke-DockerInspect -Names @($ContainerName)
+    if (-not $info) { return '' }
+    $name = (Get-MountAt -Container $info[0] -Destination '/home/node/.claude').Name
+    if (-not $name) { return '' }
+    return [string]$name
+}
+
 # Every sandbox container (singular noun per PowerShell convention).
-# The anchored regex avoids matching a user container
-# that merely contains the string, and the transient "-seed" helper a crashed
-# rebuild can leave behind is skipped.
+# The anchored regex avoids matching a user container that merely contains the
+# string. Two helpers are skipped: the "-seed" container a crashed migration from
+# an older version can leave behind, and the "-old" container that 'migrate'
+# renames the old sandbox to while it works.
 function Get-SandboxName {
     $names = docker ps -a --filter 'name=^safe-claude-' --format '{{.Names}}'
     if ($LASTEXITCODE -ne 0 -or -not $names) { return @() }
-    return @($names | Where-Object { $_ -and $_ -notlike '*-seed' })
+    return @($names | Where-Object {
+        $_ -and $_ -notlike '*-seed' -and $_ -notlike '*-old'
+    })
 }
 
 function Require-Docker {
@@ -221,112 +226,147 @@ function Require-Docker {
 function Require-Image {
     $null = docker image inspect $IMAGE_NAME 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Err "'$IMAGE_NAME' Docker image not found. Run install.ps1 (or 'safe-claude update') to build it first."
+        Write-Err "'$IMAGE_NAME' Docker image not found. Run install.ps1 (or 'safe-claude update') to pull it first."
     }
 }
 
-# ── version tracking ──────────────────────────────────────────────────────────
-
-function Read-Version {
-    if (Test-Path $VERSION_FILE) { return (Get-Content -Path $VERSION_FILE -TotalCount 1) }
-    return $null
-}
-
-function Write-VersionFile {
-    param([string]$Sha)
-    $dir = Split-Path -Parent $VERSION_FILE
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    Set-Content -Path $VERSION_FILE -Value $Sha
-}
+# ── version ───────────────────────────────────────────────────────────────────
 
 function Show-Version {
-    $sha = Read-Version
-    if (-not $sha) { $sha = "unknown" }
-    Write-Host "safe-claude $sha"
+    Write-Host "safe-claude $(Get-ImageVersion)"
 }
 
 # ── update ────────────────────────────────────────────────────────────────────
 
-function Invoke-Update {
-    param([string[]]$UpdateArgs, [bool]$BoundYes, [bool]$BoundForce)
+# The PowerShell that is running us, so child processes stay on the same edition.
+function Get-PowerShellPath {
+    $exe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+    $path = Join-Path $PSHOME $exe
+    if (Test-Path -LiteralPath $path) { return $path }
+    return 'powershell.exe'
+}
 
-    $assumeYes = $BoundYes; $force = $BoundForce
-    foreach ($a in $UpdateArgs) {
-        switch ($a) {
-            '-y'      { $assumeYes = $true }
-            '--yes'   { $assumeYes = $true }
-            '--force' { $force = $true }
-            default   { Write-Err "Unknown option for 'update': $a (usage: safe-claude update [-y] [--force])" }
-        }
+# Tag of the newest release, read off the redirect that /releases/latest serves.
+function Get-LatestRelease {
+    try {
+        $resp = Invoke-WebRequest -Uri "https://github.com/$REPO/releases/latest" `
+            -UseBasicParsing -MaximumRedirection 5 -ErrorAction Stop
+        # Windows PowerShell exposes the final URL as ResponseUri; PowerShell 7
+        # hands back an HttpResponseMessage instead.
+        $final = [string]$resp.BaseResponse.ResponseUri
+        if (-not $final) { $final = [string]$resp.BaseResponse.RequestMessage.RequestUri }
+        if ($final -match '/tag/(.+)$') { return $Matches[1] }
+    } catch {
+        Write-Verbose "Could not follow the /releases/latest redirect: $_"
     }
+    # Fall back to the API when the redirect could not be read.
+    try {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$REPO/releases/latest" `
+            -UseBasicParsing -ErrorAction Stop
+        if ($rel.tag_name) { return [string]$rel.tag_name }
+    } catch {
+        Write-Verbose "Could not query the releases API: $_"
+    }
+    return $null
+}
 
-    $self = $PSCommandPath   # the installed safe-claude.ps1 currently running
+function Invoke-Update {
+    param([string[]]$UpdateArgs)
+
+    # Reject stray arguments rather than silently ignoring them: 'update' takes
+    # none, and a typo'd flag must not fall through into a live self-install.
+    foreach ($a in @($UpdateArgs)) {
+        if (-not $a) { continue }
+        if ($a -like '-*') { Write-Err "Unknown option for 'update': $a" }
+        Write-Err "'update' takes no arguments (got: $a)"
+    }
 
     Write-Host "safe-claude update"
-    Write-Host "  Updates the 'safe-claude' command and rebuilds the '$IMAGE_NAME' image"
-    Write-Host "  from the latest 'main' ($REPO_URL)."
+    Write-Host "  Fetches the latest release and reinstalls the command + image."
     Write-Host "  Existing sandboxes are left untouched."
-    Write-Host "  Command file: $self"
     Write-Host ""
-    if (-not $assumeYes) {
-        if (-not (Confirm-Action "Proceed?")) { Write-Host "Update cancelled."; return }
-    }
 
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Err "git is required for 'update' but was not found on PATH."
-    }
     Require-Docker
 
-    $tmp = Join-Path $env:TEMP ("safe-claude-update-" + [System.Guid]::NewGuid().ToString('N'))
+    $latest = Get-LatestRelease
+    if (-not $latest) { Write-Err "Could not determine the latest release. Check your connection." }
+
+    if ($VERSION -eq $latest) {
+        Write-Success "Already up to date ($VERSION)."
+        return
+    }
+    Write-Info "Updating $VERSION -> $latest..."
+
+    $self  = $PSCommandPath   # the installed safe-claude.ps1 currently running
+    $psExe = Get-PowerShellPath
+
+    $installer = Join-Path $env:TEMP ('safe-claude-install-' + [System.Guid]::NewGuid().ToString('N') + '.ps1')
     try {
-        Write-Info "Fetching latest from $REPO_URL (branch main)..."
-        git clone --depth 1 --branch main $REPO_URL $tmp 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { Write-Err "Failed to clone $REPO_URL. Check your network and git installation." }
-
-        $newSha = (git -C $tmp rev-parse HEAD).Trim()
-        $storedSha = Read-Version
-        if ((-not $force) -and $storedSha -and ($storedSha -eq $newSha)) {
-            Write-Success "Already up to date ($($newSha.Substring(0,8)))."
-            return
+        try {
+            Invoke-WebRequest -Uri "https://github.com/$REPO/releases/download/$latest/install.ps1" `
+                -OutFile $installer -UseBasicParsing -ErrorAction Stop
+        } catch {
+            Write-Err "Could not download the installer for ${latest}: $_"
+        }
+        if (-not (Test-Path -LiteralPath $installer) -or (Get-Item -LiteralPath $installer).Length -eq 0) {
+            Write-Err "Downloaded installer is empty."
         }
 
-        # Replace the installed script (PowerShell reads it into memory at start,
-        # so the file is not locked; Move-Item -Force replaces it atomically).
-        Write-Info "Updating command at $self..."
-        $tmpDest = "$self.tmp"
-        Copy-Item -Path (Join-Path $tmp "safe-claude.ps1") -Destination $tmpDest -Force
-        Move-Item -Path $tmpDest -Destination $self -Force
-        Write-Success "Command updated."
-
-        # --pull refreshes the base image. Docker keys its layer cache on
-        # instruction text, and this Dockerfile has no COPY, so an unchanged
-        # Dockerfile would otherwise rebuild to a byte-identical image --
-        # including a stale Claude Code install layer. '--force' therefore also
-        # means "do not trust the cache".
-        $buildArgs = @('--pull', '--build-arg', "SAFE_CLAUDE_VERSION=$newSha")
-        if ($force) {
-            $buildArgs += '--no-cache'
-            Write-Info "Rebuilding Docker image '$IMAGE_NAME' from scratch (--force: cache disabled)..."
-        } else {
-            Write-Info "Rebuilding Docker image '$IMAGE_NAME' (this may take a few minutes)..."
+        # Reinstall the command to the directory in which it currently lives.
+        # ASSUME_YES rather than -Yes: this has to drive whichever installer the
+        # target release happens to ship, and the -Yes switch only exists from
+        # this release onward. An installer that predates it ignores the variable
+        # and prompts; one that predates *both* would abort on the unknown flag.
+        $env:ASSUME_YES = '1'
+        try {
+            & $psExe -NoProfile -ExecutionPolicy Bypass -File $installer -InstallDir (Split-Path -Parent $self)
+        } finally {
+            Remove-Item Env:\ASSUME_YES -ErrorAction SilentlyContinue
         }
-        docker build @buildArgs -t $IMAGE_NAME $tmp
-        if ($LASTEXITCODE -ne 0) { Write-Err "Docker build failed. See output above." }
-        Write-Success "Image '$IMAGE_NAME' rebuilt."
-
-        Write-VersionFile $newSha
-        Write-Success "Updated to $($newSha.Substring(0,8))."
-
-        if (Get-SandboxName) {
-            Write-Host ""
-            Write-Warn "Existing sandboxes still run the previous image."
-            Write-Host "  They keep working as-is. See which, and how to move them over, with:"
-            Write-Host "      safe-claude list"
-        }
+        if ($LASTEXITCODE -ne 0) { Write-Err "Installation of $latest failed." }
     }
     finally {
-        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
     }
+
+    # The installer tagged the new image as :<latest>; use that to find stale sandboxes.
+    $newImage = Invoke-DockerInspect -Names @("ghcr.io/${REPO}:$latest") -Image
+    if (-not $newImage) {
+        Write-Warn "Could not identify the new image; skipping sandbox check."
+        return
+    }
+    $newId = $newImage[0].Id
+
+    $names = Get-SandboxName
+    if (-not $names) { return }
+
+    $stalePaths = @()
+    foreach ($c in (Invoke-DockerInspect -Names $names)) {
+        if (-not $c) { continue }
+        $path = Get-LabelOr -Value (Get-LabelValue -Labels $c.Config.Labels -Name 'safe-claude.path') -Fallback ''
+        if ($c.Image -ne $newId -and $path) { $stalePaths += $path }
+    }
+
+    if ($stalePaths) {
+        Write-Host ""
+        Write-Warn "$($stalePaths.Count) sandbox(es) still run an older image."
+        if (Confirm-Action "Migrate all of them to the new image now?") {
+            foreach ($p in $stalePaths) {
+                Write-Host ""
+                # 'migrate' either succeeds or rolls the sandbox back; a declined
+                # confirmation also exits non-zero. Keep going through the rest.
+                & $psExe -NoProfile -ExecutionPolicy Bypass -File $self migrate $p
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warn "Migration of '$p' did not complete -- see the output above."
+                }
+            }
+        } else {
+            Write-Host "  You can migrate them individually later with:"
+            Write-Host "      safe-claude migrate <path_to_folder>"
+        }
+    }
+    Write-Host ""
+    Write-Success "Restart your shell or re-run 'safe-claude' to use $latest."
 }
 
 # ── list ──────────────────────────────────────────────────────────────────────
@@ -348,7 +388,7 @@ function Invoke-List {
     $currentId = if ($imageInfo) { $imageInfo[0].Id } else { $null }
     $currentVer = ''
     if (-not $currentId) {
-        Write-Warn "The '$IMAGE_NAME' image is not built, so sandboxes cannot be compared against it."
+        Write-Warn "The '$IMAGE_NAME' image is not pulled, so sandboxes cannot be compared against it."
     } else {
         $currentVer = Get-LabelValue -Labels $imageInfo[0].Config.Labels -Name 'org.opencontainers.image.revision'
         if ($currentVer -eq 'unknown') { $currentVer = '' }
@@ -358,7 +398,7 @@ function Invoke-List {
     $containers = Invoke-DockerInspect -Names $names
     if (-not $containers) { Write-Err "Could not inspect the sandbox containers." }
 
-    $rows = @(); $suggest = @(); $stale = 0; $noVolume = 0
+    $rows = @(); $suggest = @(); $stale = 0
     foreach ($c in $containers) {
         if (-not $c) { continue }
         $status = $c.State.Status
@@ -366,29 +406,25 @@ function Invoke-List {
         $lPath  = Get-LabelValue -Labels $c.Config.Labels -Name 'safe-claude.path'
         $lVer   = Get-LabelValue -Labels $c.Config.Labels -Name 'safe-claude.version'
         $mSrc   = (Get-MountAt -Container $c -Destination '/workspace').Source
-        $vol    = (Get-MountAt -Container $c -Destination '/home/node/.claude').Name
 
         $path = Get-LabelOr -Value $lPath -Fallback $mSrc
         if (-not $path) { $path = '(unknown)' }
 
-        if (-not $currentId)        { $image = 'unknown' }   # nothing to compare against
-        elseif ($img -eq $currentId){ $image = 'current' }
-        else                        { $image = 'outdated'; $stale++ }
+        if (-not $currentId)         { $image = 'unknown' }   # nothing to compare against
+        elseif ($img -eq $currentId) { $image = 'current' }
+        else                         { $image = 'outdated'; $stale++ }
         $ver = Get-LabelOr -Value $lVer -Fallback ''
         if ($ver -eq 'unknown') { $ver = '' }
         # A sandbox running the current image is, by definition, that image's
         # version -- so fill it in for containers created before version stamping.
         if (-not $ver -and $currentId -and $img -eq $currentId) { $ver = $currentVer }
-        if ($ver) { $image = "$image ($($ver.Substring(0, [Math]::Min(8, $ver.Length))))" }
-
-        $vol = Get-LabelOr -Value $vol -Fallback ''
-        if ($vol) { $claude = 'volume' } else { $claude = 'in-image'; $noVolume++ }
+        if ($ver) { $image = "$image ($ver)" }
 
         $note = ''
         if ($path -ne '(unknown)' -and -not (Test-Path -LiteralPath $path)) { $note = '  (folder missing)' }
 
-        # Only suggest a rebuild we could actually run: it needs the image present.
-        if ($currentId -and $path -ne '(unknown)' -and ($image -like 'outdated*' -or $claude -eq 'in-image')) {
+        # Only suggest a migrate we could actually run: it needs the image present.
+        if ($currentId -and $path -ne '(unknown)' -and $image -like 'outdated*') {
             $suggest += $path
         }
 
@@ -396,7 +432,6 @@ function Invoke-List {
             Folder = Split-Path -Leaf $path
             Status = $status
             Image  = $image
-            Claude = $claude
             Path   = "$path$note"
         }
     }
@@ -408,241 +443,152 @@ function Invoke-List {
     $w = (@($rows.Folder) + @('FOLDER') | Measure-Object -Property Length -Maximum).Maximum
 
     Write-Host ""
-    Write-Host ("{0,-$w}  {1,-8}  {2,-20}  {3,-9}  {4}" -f 'FOLDER', 'STATUS', 'IMAGE', '.claude', 'PATH')
+    Write-Host ("{0,-$w}  {1,-8}  {2,-20}  {3}" -f 'FOLDER', 'STATUS', 'IMAGE', 'PATH')
     foreach ($r in $rows) {
-        Write-Host ("{0,-$w}  {1,-8}  {2,-20}  {3,-9}  {4}" -f $r.Folder, $r.Status, $r.Image, $r.Claude, $r.Path)
+        Write-Host ("{0,-$w}  {1,-8}  {2,-20}  {3}" -f $r.Folder, $r.Status, $r.Image, $r.Path)
     }
 
     Write-Host ""
     $summary = "$($rows.Count) sandbox" + $(if ($rows.Count -eq 1) { '.' } else { 'es.' })
-    if ($stale)    { $summary += "  $stale on an older image." }
-    if ($noVolume) { $summary += "  $noVolume without a persistent .claude volume." }
+    if ($stale) { $summary += "  $stale on an older image." }
     Write-Host $summary
 
     if ($currentId -and -not $currentVer) {
         Write-Host ""
-        Write-Host "  The '$IMAGE_NAME' image carries no version stamp, so the commit a"
-        Write-Host "  sandbox runs cannot be shown. Rebuild the image to enable it:"
-        Write-Host "      safe-claude update --force"
-        Write-Host "  (or re-run the installer and say yes when it offers to rebuild)."
+        Write-Host "  The image carries no version stamp. Update with:"
+        Write-Host "      safe-claude update"
     }
 
     if ($suggest) {
         Write-Host ""
-        Write-Host "  Move a sandbox onto the current image (login/history preserved):"
-        foreach ($p in ($suggest | Sort-Object -Unique)) { Write-Host "      safe-claude rebuild $p" }
+        Write-Host "  Move a sandbox onto the current image:"
+        foreach ($p in ($suggest | Sort-Object -Unique)) { Write-Host "      safe-claude migrate $p" }
     }
 }
 
-# ── rebuild (opt-in per-sandbox migration onto the new image) ─────────────────
+# ── migrate (opt-in for each container) ───────────────────────────────────────
+# Recreates the sandbox on the current image. A sandbox whose config lives on a
+# named volume keeps its login and history (the volume is remounted). A sandbox
+# from before config volumes existed kept its config inside the container, and
+# that is discarded with it -- the user is asked first.
 
-function Invoke-Rebuild {
-    param([string[]]$RebuildArgs, [bool]$BoundYes, [bool]$BoundNoBackup)
+function Invoke-Migrate {
+    param([string[]]$MigrateArgs)
 
-    $assumeYes = $BoundYes; $noBackup = $BoundNoBackup; $pathArg = $null
-    foreach ($a in $RebuildArgs) {
-        if     ($a -eq '-y' -or $a -eq '--yes') { $assumeYes = $true }
-        elseif ($a -eq '--no-backup')           { $noBackup  = $true }
-        elseif ($a -like '-*')                  { Write-Err "Unknown option for 'rebuild': $a" }
-        elseif ($pathArg)                       { Write-Err "'rebuild' takes a single folder; unexpected extra argument: $a" }
-        else                                     { $pathArg = $a }
+    $pathArg = $null
+    foreach ($a in @($MigrateArgs)) {
+        if (-not $a)             { continue }
+        if ($a -like '-*')       { Write-Err "Unknown option for 'migrate': $a" }
+        elseif ($pathArg)        { Write-Err "'migrate' takes a single folder; unexpected extra argument: $a" }
+        else                     { $pathArg = $a }
     }
-    if (-not $pathArg) { Write-Err "Usage: safe-claude rebuild <path_to_folder> [-y] [--no-backup]" }
+    if (-not $pathArg) { Write-Err "Usage: safe-claude migrate <path_to_folder>" }
 
     Require-Docker
     Require-Image
 
-    try { $abs = (Resolve-Path -Path $pathArg -ErrorAction Stop).Path }
+    try { $abs = (Resolve-Path -LiteralPath $pathArg -ErrorAction Stop).Path }
     catch { Write-Err "Path does not exist: $pathArg" }
-    if (-not (Test-Path -Path $abs -PathType Container)) { Write-Err "Not a directory: $pathArg" }
+    if (-not (Test-Path -LiteralPath $abs -PathType Container)) { Write-Err "Not a directory: $pathArg" }
 
     $container = Resolve-ContainerName -AbsPath $abs
-    $volume    = Get-VolumeName -ContainerName $container
 
     $null = docker container inspect $container 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-Err "No sandbox exists for $abs (container '$container'). Nothing to rebuild." }
+    if ($LASTEXITCODE -ne 0) { Write-Err "No sandbox exists for $abs. Nothing to migrate." }
 
-    Write-Host "safe-claude rebuild"
-    Write-Host "  Sandbox: $container"
-    Write-Host "  Folder:  $abs  (your files here are NOT touched)"
-    Write-Host ""
-    Write-Host "  This recreates the sandbox on the current '$IMAGE_NAME' image."
-    Write-Host "  Claude login/history is preserved via a Docker volume."
-    Write-Host "  System packages installed inside the container (apt/pip) are NOT carried over"
-    Write-Host "  (a backup image of the old container is made so you can recover them; if"
-    Write-Host "  that backup cannot be made, the rebuild stops rather than proceeding)."
-    Write-Host ""
-    if (-not $assumeYes) {
-        if (-not (Confirm-Action "Rebuild this sandbox?")) { Write-Host "Rebuild cancelled."; return }
+    # Reuse the volume the old container mounted at .claude, if it had one --
+    # login and history come across with it.
+    $hadVolume = Get-ClaudeVolumeOf -ContainerName $container
+    $volume = if ($hadVolume) { $hadVolume } else { Get-VolumeName -ContainerName $container }
+
+    if (-not $hadVolume) {
+        Write-Warn "This sandbox predates config volumes: its Claude login and history"
+        Write-Warn "live inside the container and are discarded with it."
+        if (-not (Confirm-Action "Migrate anyway (Claude will ask you to log in again)?")) {
+            Write-Info "Migration cancelled. Your sandbox is unchanged."
+            exit 1
+        }
     }
 
-    # Is /home/node/.claude already backed by a named volume?
-    $info = Invoke-DockerInspect -Names @($container)
-    $usesVolume = $null
-    if ($info) { $usesVolume = (Get-MountAt -Container $info[0] -Destination '/home/node/.claude').Name }
+    # Rename rather than remove, so the old container can be put back if the
+    # new one fails to start. It is deleted once the new one is up.
+    $old = "$container-old"
+    docker rm -f $old 2>&1 | Out-Null
+    docker rename $container $old 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Err "Could not rename the old container. Nothing was changed." }
 
-    $tmp = Join-Path $env:TEMP ("safe-claude-rebuild-" + [System.Guid]::NewGuid().ToString('N'))
-    try {
-        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-        if (-not $usesVolume) {
-            Write-Info "Migrating Claude login/history into volume '$volume'..."
-            $claudeTmp = Join-Path $tmp "claude"
-            New-Item -ItemType Directory -Path $claudeTmp -Force | Out-Null
-            docker cp "${container}:/home/node/.claude/." $claudeTmp
-            if ($LASTEXITCODE -ne 0) { Write-Err "Failed to copy /home/node/.claude out of the container." }
-            docker volume create $volume | Out-Null
-            # Seed the volume via a helper container that has it mounted. We only
-            # bind-mount a named volume (never a host path), so this is portable.
-            $helper = "$container-seed"
-            docker rm -f $helper 2>&1 | Out-Null
-            docker run -d --name $helper -v "${volume}:/dest" $IMAGE_NAME tail -f /dev/null | Out-Null
-            docker cp "$claudeTmp/." "${helper}:/dest/"
-            if ($LASTEXITCODE -ne 0) { docker rm -f $helper 2>&1 | Out-Null; Write-Err "Failed to seed volume '$volume'." }
-            # 1000:1000 is the image's built-in 'node' user, which is who Claude
-            # runs as inside the container on Docker Desktop.
-            #
-            # chmod: the copy above round-trips the files through NTFS, which
-            # cannot represent Unix modes, so they come back world-readable.
-            # Claude Code refuses to read .credentials.json unless it is 0600.
-            docker exec -u 0 $helper sh -c 'chown -R 1000:1000 /dest && chmod -R go-rwx /dest' | Out-Null
-            docker rm -f $helper | Out-Null
-            Write-Success "Volume '$volume' seeded from the old container."
-        } else {
-            Write-Info "Sandbox already uses volume '$usesVolume'; login/history will persist automatically."
-            $volume = $usesVolume
+    Write-Info "Creating the new container on the current image..."
+    docker run -dit `
+        --name $container `
+        --label "safe-claude.path=$abs" `
+        --label "safe-claude.version=$(Get-ImageVersion)" `
+        -v "${abs}:/workspace" `
+        -v "${volume}:/home/node/.claude" `
+        $IMAGE_NAME | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Could not create the new container -- putting the old one back."
+        docker rename $old $container 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Could not rename it back. Restore it with:  docker rename $old $container"
         }
-
-        # .claude.json holds Claude's account state. Images without
-        # CLAUDE_CONFIG_DIR keep it outside .claude/, where the volume does not
-        # reach it, so save it here and put it back after the swap -- otherwise
-        # the rebuild logs you out.
-        $savedConfig = $null
-        $candidate = Join-Path $tmp "claude.json"
-        foreach ($src in @('/home/node/.claude.json', '/home/node/.claude/.claude.json')) {
-            Remove-Item -Force $candidate -ErrorAction SilentlyContinue
-            docker cp "${container}:$src" $candidate 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0 -and (Test-Path $candidate)) { $savedConfig = $candidate; break }
-        }
-
-        # Safety backup of the whole old container (captures apt/pip installs
-        # too). This is the only copy of anything installed inside it, so a
-        # failure here must not be shrugged off: the next step destroys it.
-        $ts = Get-Date -Format "yyyyMMdd-HHmmss"
-        $base = (Split-Path -Leaf $abs).ToLower() -replace '[^a-z0-9_-]', '-'
-        $backup = "safe-claude-backup-$base-$ts"
-        Write-Info "Creating safety backup image '$backup'..."
-        $commitErr = (docker commit $container $backup 2>&1 | Out-String).Trim()
-        $backupOk = ($LASTEXITCODE -eq 0)
-        if ($backupOk -and -not (Invoke-DockerInspect -Names @($backup) -Image)) {
-            $backupOk = $false
-            $commitErr = "docker reported success but the image is not there"
-        }
-
-        # 'docker commit' builds on the container's image layers, so it fails when
-        # Docker's content store has lost one ("content digest ...: not found").
-        # 'docker export' reads the live filesystem instead and is unaffected; the
-        # image it produces is flattened but is still a usable backup.
-        #
-        # Via a temp file rather than a pipe: PowerShell pipes carry text, so
-        # 'docker export | docker import' would corrupt the tar.
-        if (-not $backupOk) {
-            Write-Warn "docker commit failed: $commitErr"
-            Write-Info "Falling back to 'docker export', which does not read the image store."
-            Write-Info "This writes a temporary tar of the whole container - expect several GB and a few minutes."
-            $tar = Join-Path $tmp "backup.tar"
-            docker export $container -o $tar 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                # --change restores the settings a flat export drops. None of them
-                # may contain double quotes -- PowerShell mangles native-command
-                # args that do (see Invoke-DockerInspect) -- hence shell-form CMD.
-                docker import `
-                    --change 'ENV HOME=/home/node' `
-                    --change 'ENV CLAUDE_CONFIG_DIR=/home/node/.claude' `
-                    --change 'ENV PATH=/opt/venv/bin:/home/node/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' `
-                    --change 'WORKDIR /workspace' `
-                    --change 'USER node' `
-                    --change 'CMD bash' `
-                    $tar $backup 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0 -and (Invoke-DockerInspect -Names @($backup) -Image)) {
-                    $backupOk = $true
-                    $commitErr = ""
-                    Write-Success "Backup image '$backup' created via docker export."
-                }
-            }
-            Remove-Item -Force $tar -ErrorAction SilentlyContinue
-            if (-not $backupOk) { Write-Warn "'docker export' could not produce a backup either." }
-        }
-
-        if (-not $backupOk) {
-            Write-Warn "Could not create the backup image."
-            if ($commitErr) { Write-Host "  Docker said: $commitErr" }
-            Write-Host ""
-            Write-Host "  Rebuilding replaces the container. Without a backup, anything you"
-            Write-Host "  installed inside it (apt/pip packages, files outside /workspace) is"
-            Write-Host "  gone for good. Your project files in"
-            Write-Host "      $abs"
-            Write-Host "  and your Claude login/history are safe either way."
-            Write-Host ""
-            Write-Host "  To keep your own copy first, in another terminal:"
-            Write-Host "      docker export $container -o safe-claude-backup.tar"
-            Write-Host "  That writes a flat filesystem tar - expect it to be large."
-            Write-Host ""
-            Write-Host "  A 'content digest ... not found' error is a Docker image-store fault,"
-            Write-Host "  not a problem with this sandbox. It usually clears after restarting"
-            Write-Host "  Docker Desktop, or by turning off Settings > General > 'Use containerd"
-            Write-Host "  for pulling and storing images'."
-            Write-Host ""
-            if ($noBackup) {
-                Write-Warn "Continuing without a backup (--no-backup was given)."
-            } elseif ($assumeYes) {
-                Write-Err "Stopping. Re-run with --no-backup to rebuild without one."
-            } elseif (-not (Confirm-Action "Rebuild anyway, without a backup?")) {
-                Write-Host "Rebuild cancelled. The sandbox was left as it is."
-                return
-            }
-        }
-
-        Write-Info "Removing old container and recreating on the new image..."
-        docker rm -f $container | Out-Null
-        docker run -dit --name $container --label "safe-claude.path=$abs" --label "safe-claude.version=$(Get-ImageVersion)" -v "${abs}:/workspace" -v "${volume}:/home/node/.claude" $IMAGE_NAME | Out-Null
-        if ($LASTEXITCODE -ne 0) { Write-Err "Failed to recreate container. Your files are safe in $abs; backup image: $backup." }
-
-        # Where .claude.json belongs depends on the new image: on the volume if it
-        # sets CLAUDE_CONFIG_DIR, in $HOME otherwise. Read that from the inspect
-        # JSON rather than an 'sh -c' probe, which would need double quotes.
-        if ($savedConfig) {
-            $cfgDir = '/home/node'
-            $newInfo = Invoke-DockerInspect -Names @($container)
-            if ($newInfo) {
-                $envVar = @($newInfo[0].Config.Env) | Where-Object { $_ -like 'CLAUDE_CONFIG_DIR=*' } | Select-Object -First 1
-                if ($envVar) { $cfgDir = $envVar.Substring('CLAUDE_CONFIG_DIR='.Length) }
-            }
-            docker exec $container sh -c "[ -s '$cfgDir/.claude.json' ]" 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                # The volume carries no copy, so restore the one we saved.
-                docker cp $savedConfig "${container}:$cfgDir/.claude.json" 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) {
-                    docker exec -u 0 $container sh -c "chown 1000:1000 '$cfgDir/.claude.json' && chmod 600 '$cfgDir/.claude.json'" 2>&1 | Out-Null
-                    Write-Success "Carried your Claude account state (.claude.json) into the new sandbox."
-                } else {
-                    Write-Warn "Could not carry .claude.json over - you may have to log in again."
-                }
-            }
-        }
-
-        Write-Success "Sandbox rebuilt on the '$IMAGE_NAME' image."
-        if ($backupOk) {
-            Write-Host "  Backup of the previous container: image '$backup'"
-            Write-Host "  Inspect it with:     docker run --rm -it $backup bash"
-            Write-Host "  Remove it when done: docker rmi $backup"
-        } else {
-            Write-Warn "No backup image was made; the previous container is gone."
-        }
-        Write-Host ""
-        Write-Host "  Enter the refreshed sandbox with:  safe-claude $pathArg"
+        Write-Err "Migration aborted. Your sandbox is unchanged."
     }
-    finally {
-        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+
+    docker rm -f $old 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Could not remove the old container. Remove it with:  docker rm -f $old"
+    }
+
+    if ($hadVolume) {
+        Write-Info "Config stays on volume '$volume' -- your login and history came across."
+    }
+    Write-Success "Sandbox migrated. Enter it with:  safe-claude $pathArg"
+}
+
+# ── remove (opt-in for each container) ────────────────────────────────────────
+
+function Invoke-Remove {
+    param([string[]]$RemoveArgs)
+
+    $pathArg = $null
+    foreach ($a in @($RemoveArgs)) {
+        if (-not $a)       { continue }
+        if ($a -like '-*') { Write-Err "Unknown option for 'remove': $a" }
+        elseif ($pathArg)  { Write-Err "'remove' takes a single folder; unexpected extra argument: $a" }
+        else               { $pathArg = $a }
+    }
+    if (-not $pathArg) { Write-Err "Usage: safe-claude remove <path_to_folder>" }
+
+    Require-Docker
+
+    try { $abs = (Resolve-Path -LiteralPath $pathArg -ErrorAction Stop).Path }
+    catch { Write-Err "Path does not exist: $pathArg" }
+
+    $container = Resolve-ContainerName -AbsPath $abs
+
+    $null = docker container inspect $container 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-Err "No sandbox exists for $abs. Nothing to remove." }
+
+    # Read the volume off the container before it goes: a migrated sandbox may
+    # carry a volume named after an earlier container name.
+    $volume = Get-ClaudeVolumeOf -ContainerName $container
+    if (-not $volume) { $volume = Get-VolumeName -ContainerName $container }
+
+    Write-Info "Removing container '$container'..."
+    docker rm -f $container | Out-Null
+    Write-Success "Sandbox removed."
+    Write-Host "  Your project files in $abs are untouched."
+
+    $null = docker volume inspect $volume 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        if (Confirm-Action "Also delete the '$volume' volume (credentials, history, settings)?") {
+            docker volume rm $volume | Out-Null
+            Write-Success "Claude config removed."
+        } else {
+            Write-Info "Kept volume '$volume'."
+            Write-Host "  List volumes:    docker volume ls"
+            Write-Host "  Remove it later: docker volume rm $volume"
+        }
     }
 }
 
@@ -656,7 +602,7 @@ function Invoke-Rebuild {
 # 'safe-claude --version' on 5.1, which is the shell the .bat wrapper runs.
 $versionTokens = @('--version', '-v', 'version')
 $helpTokens    = @('--help', '-h', 'help')
-$subcommands   = @('update', 'rebuild', 'list')
+$subcommands   = @('update', 'list', 'migrate', 'remove', 'rm')
 
 $requested = @()
 if ($FolderPath) { $requested += $FolderPath }
@@ -680,9 +626,11 @@ if ($namedAFolder) {
 }
 
 switch ($FolderPath) {
-    'update'  { Invoke-Update  -UpdateArgs  $ClaudeArgs -BoundYes $Yes -BoundForce $Force; exit 0 }
+    'update'  { Invoke-Update  -UpdateArgs  $ClaudeArgs; exit 0 }
     'list'    { Invoke-List    -ListArgs    $ClaudeArgs; exit 0 }
-    'rebuild' { Invoke-Rebuild -RebuildArgs $ClaudeArgs -BoundYes $Yes -BoundNoBackup $NoBackup; exit 0 }
+    'migrate' { Invoke-Migrate -MigrateArgs $ClaudeArgs; exit 0 }
+    'remove'  { Invoke-Remove  -RemoveArgs  $ClaudeArgs; exit 0 }
+    'rm'      { Invoke-Remove  -RemoveArgs  $ClaudeArgs; exit 0 }
 }
 
 # ── argument validation ───────────────────────────────────────────────────────
@@ -693,12 +641,12 @@ if (-not $FolderPath) {
 }
 
 try {
-    $AbsPath = (Resolve-Path -Path $FolderPath -ErrorAction Stop).Path
+    $AbsPath = (Resolve-Path -LiteralPath $FolderPath -ErrorAction Stop).Path
 } catch {
     Write-Err "Path does not exist: $FolderPath"
 }
 
-if (-not (Test-Path -Path $AbsPath -PathType Container)) {
+if (-not (Test-Path -LiteralPath $AbsPath -PathType Container)) {
     Write-Err "Not a directory: $FolderPath"
 }
 
@@ -715,7 +663,7 @@ $ContainerName = Resolve-ContainerName -AbsPath $AbsPath
 $null = docker container inspect $ContainerName 2>&1
 if ($LASTEXITCODE -ne 0) {
     # A per-sandbox named volume backs /home/node/.claude so Claude's login and
-    # session history survive container recreation (e.g. 'safe-claude rebuild').
+    # session history survive container recreation (e.g. 'safe-claude migrate').
     Write-Info "No container found for this folder. Creating '$ContainerName'..."
     docker run -dit `
         --name $ContainerName `
@@ -747,4 +695,7 @@ if ($ClaudeArgs -contains "--dangerously-skip-permissions") {
 
 Write-Info "Type 'exit' or press Ctrl+D to leave the container."
 Write-Host ""
-docker exec -it $ContainerName claude @ClaudeArgs
+# Claude Code refuses --dangerously-skip-permissions as root, so it runs as the
+# image's non-root 'node' user. Docker Desktop maps bind-mount ownership for us,
+# so unlike native Linux there is no host UID to match here.
+docker exec -it -u node -e HOME=/home/node $ContainerName claude @ClaudeArgs

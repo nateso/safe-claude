@@ -3,14 +3,23 @@
     Guided installation for safe-claude on Windows.
 
 .DESCRIPTION
-    1. Checks that Docker Desktop is installed and running
-    2. Builds the 'safe-claude' Docker image
-    3. Installs safe-claude.ps1 and a safe-claude.bat wrapper to a chosen directory
-    4. Adds that directory to your user PATH
+    1. Checks prerequisites (Docker Desktop)
+    2. Pulls the pinned 'safe-claude' Docker image from GHCR
+    3. Installs safe-claude.ps1 and a safe-claude.bat wrapper to a directory on
+       your PATH (and adds that directory to PATH)
+
+    Usage:
+        powershell -ExecutionPolicy Bypass -File install.ps1 [-InstallDir <path>] [-Yes]
 
 .PARAMETER InstallDir
     Where to put the 'safe-claude' command. Defaults to a per-user location that
-    needs no administrator rights. The installer creates it and adds it to PATH.
+    needs no administrator rights. Can also be set via the INSTALL_DIR
+    environment variable.
+
+.PARAMETER Yes
+    Do not prompt before reinstalling over an existing copy. Same as setting the
+    ASSUME_YES environment variable to 1, which is how 'safe-claude update'
+    drives this installer.
 
 .NOTES
     If PowerShell blocks this script due to execution policy, run:
@@ -20,12 +29,18 @@
 #>
 
 param(
-    [string]$InstallDir
+    [string]$InstallDir,
+
+    [Alias('y')]
+    [switch]$Yes
 )
 
-$IMAGE_NAME   = "safe-claude"
-$DEFAULT_DIR  = Join-Path $env:LOCALAPPDATA "Programs\safe-claude"
-$VERSION_FILE = Join-Path $env:LOCALAPPDATA "safe-claude\version"
+# Stamped by CI at release time.
+$VERSION    = '@VERSION@'
+$IMAGE_NAME = '@IMAGE_DIGEST@'      # ghcr.io/nateso/safe-claude@sha256:...
+$REPO       = 'nateso/safe-claude'
+
+$DEFAULT_DIR = Join-Path $env:LOCALAPPDATA 'Programs\safe-claude'
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -34,13 +49,43 @@ function Write-Success { param([string]$m) Write-Host "[safe-claude] OK  $m" -Fo
 function Write-Warn    { param([string]$m) Write-Host "[safe-claude] !   $m" -ForegroundColor Yellow }
 function Write-Err     { param([string]$m) Write-Host "[safe-claude] Error: $m" -ForegroundColor Red; exit 1 }
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+# Windows PowerShell 5.1 still defaults to TLS 1.0, which github.com refuses.
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+    Write-Verbose "Could not raise the TLS version: $_"
+}
+
+# Unstamped copy (run from a repo checkout, not a release) -> dev fallback.
+$DevMode = $false
+if ($VERSION -like '@*@') {
+    $DevMode    = $true
+    $VERSION    = 'dev'
+    $IMAGE_NAME = "ghcr.io/${REPO}:latest"
+}
+
+# Empty when the installer was piped into PowerShell ('irm ... | iex') rather
+# than run from a file.
+$ScriptDir = $PSScriptRoot
+
+# ── options ───────────────────────────────────────────────────────────────────
+
+if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = $env:INSTALL_DIR }
+$assumeYes = $Yes.IsPresent -or ($env:ASSUME_YES -eq '1')
+
+# PowerShell variable names are case-insensitive, so the working variable must
+# NOT be called $installDir: that is the -InstallDir parameter, and assigning
+# the default to it would discard the caller's choice.
+$usingDefault = [string]::IsNullOrWhiteSpace($InstallDir)
+if ($usingDefault) { $targetDir = $DEFAULT_DIR } else { $targetDir = $InstallDir }
+$targetDir = $targetDir.TrimEnd('\').TrimEnd('/')
 
 # ── step 1: prerequisites ─────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "==========================================="
-Write-Host "  safe-claude installer (Windows)"
+Write-Host "  safe-claude installer ($VERSION)"
 Write-Host "==========================================="
 Write-Host ""
 
@@ -57,68 +102,68 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Success "Docker is available and running."
 
-# Resolve the source commit up front: it is stamped into the image below and
-# recorded for 'safe-claude --version' further down.
-$sha = (git -C $ScriptDir rev-parse HEAD 2>$null)
-if ($LASTEXITCODE -ne 0 -or -not $sha) { $sha = 'unknown' } else { $sha = $sha.Trim() }
+if ($DevMode) { Write-Warn "Unstamped development copy -- using ':latest' and the repo checkout." }
 
-# ── step 2: build the Docker image ───────────────────────────────────────────
+# --- Check existing installation of safe-claude -------------------------------
+
+$existing = Get-Command safe-claude -ErrorAction SilentlyContinue
+if ($existing) {
+    $existingPath = $existing.Source
+    $existingVersion = 'unknown'
+    try {
+        $reported = (& $existingPath --version 2>$null | Out-String).Trim()
+        if ($reported) { $existingVersion = $reported }
+    } catch {
+        Write-Verbose "Could not read the installed version: $_"
+    }
+
+    Write-Host ""
+    Write-Warn "safe-claude is already installed at $existingPath (version: $existingVersion)"
+
+    $existingDir = (Split-Path -Parent $existingPath).TrimEnd('\')
+    if ($usingDefault -and $existingDir -ne $targetDir) {
+        Write-Info "Reinstalling over the existing location."
+        $targetDir = $existingDir
+    }
+
+    if (-not $assumeYes) {
+        if (-not [Console]::IsInputRedirected) {
+            $reply = Read-Host "[safe-claude] Reinstall $VERSION to '$targetDir'? [y/N]"
+            if ($reply -notmatch '^[Yy]$') {
+                Write-Info "Aborted -- nothing was changed."
+                exit 0
+            }
+        } else {
+            Write-Info "No terminal available -- proceeding with reinstall."
+        }
+    }
+}
+
+# ── step 2: pull the Docker image ─────────────────────────────────────────────
 
 Write-Host ""
-$imgJson = docker image inspect $IMAGE_NAME 2>$null
-if ($LASTEXITCODE -eq 0 -and $imgJson) {
-    # Compare the image's stamped commit with this checkout. An image built from
-    # different source is the common cause of "I reinstalled but nothing
-    # changed", so recommend rebuilding rather than defaulting to skip.
-    $imgSha = 'unknown'
-    try {
-        $labels = (@($imgJson | ConvertFrom-Json)[0]).Config.Labels
-        if ($labels) {
-            $prop = $labels.PSObject.Properties['org.opencontainers.image.revision']
-            if ($prop -and $prop.Value) { $imgSha = [string]$prop.Value }
-        }
-    } catch {
-        # Unparseable inspect output: treat the image as carrying no stamp.
-        $imgSha = 'unknown'
-    }
-
-    if ($sha -ne 'unknown' -and $imgSha -eq $sha) {
-        Write-Warn "Docker image '$IMAGE_NAME' already exists and matches this checkout ($($sha.Substring(0,8)))."
-        $rebuild = Read-Host "         Rebuild it anyway? [y/N]"
-        if ([string]::IsNullOrWhiteSpace($rebuild)) { $rebuild = 'N' }
-    } else {
-        $shortImg = if ($imgSha.Length -ge 8) { $imgSha.Substring(0,8) } else { $imgSha }
-        $shortSrc = if ($sha.Length -ge 8) { $sha.Substring(0,8) } else { $sha }
-        Write-Warn "Docker image '$IMAGE_NAME' exists but was built from $shortImg, not this checkout ($shortSrc)."
-        Write-Warn "Rebuilding keeps the image in step with the command being installed."
-        $rebuild = Read-Host "         Rebuild it? [Y/n]"
-        if ([string]::IsNullOrWhiteSpace($rebuild)) { $rebuild = 'Y' }
-    }
-} else {
-    $rebuild = "y"
+$imagePresent = $false
+if (-not $DevMode) {
+    $null = docker image inspect $IMAGE_NAME 2>&1
+    # A digest reference is immutable: present locally == correct. Nothing to check.
+    $imagePresent = ($LASTEXITCODE -eq 0)
 }
 
-if ($rebuild -match '^[Yy]$') {
-    Write-Info "Building Docker image '$IMAGE_NAME' (this may take a few minutes)..."
-    # --pull so a rebuild actually refreshes the base image rather than reusing a
-    # stale local copy.
-    docker build --pull --build-arg "SAFE_CLAUDE_VERSION=$sha" -t $IMAGE_NAME $ScriptDir
+if ($imagePresent) {
+    Write-Success "Image for $VERSION is already present locally."
+} else {
+    Write-Info "Pulling safe-claude image for $VERSION (this may take a few minutes)..."
+    docker pull $IMAGE_NAME
     if ($LASTEXITCODE -ne 0) {
-        Write-Err "Docker build failed. Check the output above for details."
+        Write-Err "Could not pull the image. Check your internet connection, and that`n         the 'safe-claude' package on GHCR is public."
     }
-    Write-Success "Docker image '$IMAGE_NAME' built successfully."
-} else {
-    Write-Info "Skipping image build."
+    Write-Success "Image pulled successfully."
+    # Digest pulls show up as <none> in 'docker images'; give it a readable tag.
+    if (-not $DevMode) { docker tag $IMAGE_NAME "ghcr.io/${REPO}:$VERSION" | Out-Null }
 }
 
-# ── step 3: install directory ────────────────────────────────────────────────
-
-# PowerShell variable names are case-insensitive, so this must NOT be called
-# $installDir: that is the -InstallDir parameter, and assigning the default to it
-# would discard the caller's choice.
-$usingDefault = [string]::IsNullOrWhiteSpace($InstallDir)
-if ($usingDefault) { $targetDir = $DEFAULT_DIR } else { $targetDir = $InstallDir }
-$targetDir = $targetDir.TrimEnd('\').TrimEnd('/')
+# ── step 3: install the safe-claude command ───────────────────────────────────
+# The script is a release asset from the same release as this installer.
 
 Write-Host ""
 Write-Info "Installing the 'safe-claude' command to:"
@@ -127,17 +172,64 @@ if ($usingDefault) {
     Write-Host "             (to put it somewhere else, re-run with:  -InstallDir <path>)"
 }
 
-if (-not (Test-Path $targetDir)) {
-    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+if (-not (Test-Path -LiteralPath $targetDir)) {
+    try {
+        New-Item -ItemType Directory -Path $targetDir -Force -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Err "Could not create '$targetDir': $_"
+    }
     Write-Success "Created directory '$targetDir'."
 }
 
-# ── step 4: copy files ────────────────────────────────────────────────────────
+$destPs1 = Join-Path $targetDir 'safe-claude.ps1'
+$destBat = Join-Path $targetDir 'safe-claude.bat'
 
-$destPs1 = Join-Path $targetDir "safe-claude.ps1"
-$destBat = Join-Path $targetDir "safe-claude.bat"
+# A GUID-named file in the user's TEMP: a fixed name would let anything else on
+# the machine pre-create it and swap its content before it is moved into place.
+$tmpScript = Join-Path $env:TEMP ('safe-claude-' + [System.Guid]::NewGuid().ToString('N') + '.ps1')
+$staged    = Join-Path $targetDir (".safe-claude.ps1.tmp.$PID")
 
-Copy-Item -Path (Join-Path $ScriptDir "safe-claude.ps1") -Destination $destPs1 -Force
+try {
+    if ($DevMode) {
+        # Dev: use the copy sitting next to this installer in the checkout.
+        $localCopy = if ($ScriptDir) { Join-Path $ScriptDir 'safe-claude.ps1' } else { $null }
+        if (-not ($localCopy -and (Test-Path -LiteralPath $localCopy))) {
+            Write-Err "Dev mode: no 'safe-claude.ps1' next to install.ps1."
+        }
+        Copy-Item -LiteralPath $localCopy -Destination $tmpScript -Force
+    } else {
+        Write-Info "Downloading the safe-claude script ($VERSION)..."
+        try {
+            Invoke-WebRequest -Uri "https://github.com/$REPO/releases/download/$VERSION/safe-claude.ps1" `
+                -OutFile $tmpScript -UseBasicParsing -ErrorAction Stop
+        } catch {
+            Write-Err "Could not download the safe-claude script for $VERSION."
+        }
+    }
+
+    # Sanity checks: non-empty, looks like the right script, parses.
+    if (-not (Test-Path -LiteralPath $tmpScript) -or (Get-Item -LiteralPath $tmpScript).Length -eq 0) {
+        Write-Err "Downloaded script is empty."
+    }
+    if ((Get-Content -LiteralPath $tmpScript -Raw) -notmatch 'safe-claude') {
+        Write-Err "Downloaded file is not the safe-claude script."
+    }
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Resolve-Path -LiteralPath $tmpScript).Path, [ref]$null, [ref]$parseErrors)
+    if ($parseErrors) {
+        Write-Err "Downloaded script fails a syntax check: $($parseErrors[0].Message)"
+    }
+
+    # Stage next to the destination, then rename: same directory, and it never
+    # truncates $destPs1 in place -- which may be the very script running us when
+    # invoked via 'safe-claude update'.
+    Copy-Item -LiteralPath $tmpScript -Destination $staged -Force
+    Move-Item -LiteralPath $staged -Destination $destPs1 -Force
+} finally {
+    Remove-Item -LiteralPath $tmpScript -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $staged    -Force -ErrorAction SilentlyContinue
+}
 
 # .bat wrapper so 'safe-claude' works from CMD and PowerShell without typing .ps1
 @"
@@ -145,21 +237,10 @@ Copy-Item -Path (Join-Path $ScriptDir "safe-claude.ps1") -Destination $destPs1 -
 powershell.exe -ExecutionPolicy Bypass -File "%~dp0safe-claude.ps1" %*
 "@ | Set-Content -Path $destBat -Encoding ASCII
 
-Write-Success "Files installed."
+Write-Success "'safe-claude' $VERSION installed to '$destPs1'."
 
-# ── step 4b: record installed version ─────────────────────────────────────────
-# Store the source commit SHA so 'safe-claude update' can detect "already up to
-# date" and 'safe-claude --version' can report it.
-$verDir = Split-Path -Parent $VERSION_FILE
-if (-not (Test-Path $verDir)) { New-Item -ItemType Directory -Path $verDir -Force | Out-Null }
-Set-Content -Path $VERSION_FILE -Value $sha
-if ($sha -eq 'unknown') {
-    Write-Warn "Not a git checkout - recorded version as 'unknown'."
-} else {
-    Write-Success "Recorded version $($sha.Substring(0,8))."
-}
-
-# ── step 5: add to PATH ───────────────────────────────────────────────────────
+# ── step 3b: add to PATH ──────────────────────────────────────────────────────
+# Windows-only step: the bash installer's default dir is already on PATH.
 
 $currentPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
 if ($currentPath -notlike "*$targetDir*") {
@@ -170,14 +251,25 @@ if ($currentPath -notlike "*$targetDir*") {
     Write-Info "'$targetDir' is already on your PATH."
 }
 
-# ── step 6: verify ────────────────────────────────────────────────────────────
+# ── step 4: verify ────────────────────────────────────────────────────────────
 
 Write-Host ""
-$refreshedPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-if ($refreshedPath -like "*$targetDir*") {
-    Write-Success "Installation complete."
+$found = Get-Command safe-claude -ErrorAction SilentlyContinue
+if ($found -and ((Split-Path -Parent $found.Source).TrimEnd('\') -eq $targetDir)) {
+    Write-Success "Installation verified -- 'safe-claude' is on your PATH."
+} elseif ($found) {
+    Write-Warn "Another copy at '$($found.Source)' shadows the one just installed to '$destPs1'."
+    Write-Warn "Remove it, or re-run with:  -InstallDir $(Split-Path -Parent $found.Source)"
 } else {
-    Write-Warn "Could not verify PATH. You may need to add '$targetDir' manually."
+    # A fresh PATH entry only reaches new terminals, so Get-Command can miss it
+    # in this session even though the install succeeded.
+    $refreshedPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+    if ($refreshedPath -like "*$targetDir*") {
+        Write-Success "Installation verified -- restart your terminal, then 'safe-claude' will be on your PATH."
+    } else {
+        Write-Warn "'$targetDir' does not appear to be on your PATH."
+        Write-Warn "Add it under:  Settings > System > About > Advanced system settings > Environment Variables"
+    }
 }
 
 # ── done ──────────────────────────────────────────────────────────────────────

@@ -89,6 +89,16 @@ container_name_for_path() {
   echo "safe-claude-${base}-${hash}"
 }
 
+# Name of the volume mounted at /home/node/.claude in a container, or empty.
+claude_volume_of() {
+  local v
+  v="$(docker inspect --format \
+    '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Name}}{{end}}{{end}}' \
+    "$1" 2>/dev/null || true)"
+  [[ "$v" != "<no value>" ]] || v=""
+  printf '%s' "$v"
+}
+
 # ── docker pre-flight ───────────────────────────────────────────────────────
 
 require_docker() {
@@ -119,11 +129,14 @@ label_or() {
   if [[ -z "$1" || "$1" == "<no value>" ]]; then printf '%s' "$2"; else printf '%s' "$1"; fi
 }
 
-# Names of all sandbox containers, newest Docker name-filter regex so we do not
-# match a user's unrelated container that merely contains the string, and
-# skipping the transient '-seed' helper a crashed rebuild can leave behind.
+# Names of all sandbox containers. The anchored Docker name filter keeps us from
+# matching a user's unrelated container that merely contains the string, and the
+# grep drops the helpers a run can leave behind: the '-seed' container older
+# versions used, and the '-old' container 'migrate' renames the old sandbox to
+# while it works.
 sandbox_names() {
-  docker ps -a --filter 'name=^safe-claude-' --format '{{.Names}}' || true
+  docker ps -a --filter 'name=^safe-claude-' --format '{{.Names}}' \
+    | grep -Ev -- '-(seed|old)$' || true
 }
 
 # ── version tracking ────────────────────────────────────────────────────────
@@ -151,7 +164,8 @@ cmd_update() {
   latest_release_url="https://github.com/${REPO}/releases/latest"
 
   local latest
-  latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_release_url" | sed 's|.*/tag/||')
+  latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_release_url" | sed 's|.*/tag/||') \
+    || err "Could not reach GitHub to check for the latest release. Check your connection."
 
   [[ -n "$latest" && "$latest" != *"/releases"* ]] || err "Could not determine the latest release. Check your connection."
 
@@ -191,6 +205,8 @@ cmd_update() {
 
   local stale_paths=() img path
   local tmpl='{{.Image}}|{{index .Config.Labels "safe-claude.path"}}'
+
+  # shellcheck disable=SC2086  # deliberate word-splitting: $names is a list
   while IFS='|' read -r img path; do
     [[ -n "$img" ]] || continue
     if [[ "$img" != "$new_id" && -n "$path" && "$path" != "<no value>" ]]; then
@@ -206,7 +222,9 @@ cmd_update() {
       local p
       for p in "${stale_paths[@]}"; do
         echo ""
-        "$self" migrate "$p"
+        # 'migrate' either succeeds or rolls the sandbox back; a declined
+        # confirmation also exits non-zero. Keep going through the rest.
+        "$self" migrate "$p" || warn "Migration of '${p}' did not complete -- see the output above."
       done
     else
       echo "  You can migrate them individually later with:"
@@ -323,9 +341,11 @@ cmd_list() {
   fi
 }
 
-# ── command migrate (opt-in for each container) ─────────────────────────────────────────────────────────
-# during migration all credentials and claude settings persist.
-# allows users to keep their claude environments in tact
+# ── command migrate (opt-in for each container) ─────────────────────────────
+# Recreates the sandbox on the current image. A sandbox whose config lives on a
+# named volume keeps its login and history (the volume is remounted). A sandbox
+# from before config volumes existed kept its config inside the container, and
+# that is discarded with it -- the user is asked first.
 cmd_migrate() {
   local patharg=""
   while [[ $# -gt 0 ]]; do
@@ -347,68 +367,55 @@ cmd_migrate() {
 
   local container
   container="$(container_name_for_path "$abs")"
-  local volume="${container}-claude"
 
   docker container inspect "$container" &>/dev/null \
     || err "No sandbox exists for ${abs}. Nothing to migrate."
 
-  # Check if .claude is already on a named volume.
-  local has_volume
-  has_volume="$(docker inspect --format \
-    '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Name}}{{end}}{{end}}' \
-    "$container" 2>/dev/null || true)"
+  # Reuse the volume the old container mounted at .claude, if it had one --
+  # login and history come across with it.
+  local had_volume volume
+  had_volume="$(claude_volume_of "$container")"
+  volume="${had_volume:-${container}-claude}"
 
-  # Old containers store .claude in the writable layer — copy it out before
-  # destroying the container, then seed a named volume with it.
-  local tmp=""
-  if [[ -z "$has_volume" || "$has_volume" == "<no value>" ]]; then
-    tmp="$(mktemp -d)"
-    trap "rm -rf '$tmp'" EXIT
-
-    info "Old container has no volume — saving Claude config..."
-    if docker cp "$container:/home/node/.claude/." "$tmp/claude/"; then
-      success "Config saved."
-    else
-      warn "Could not copy Claude config from the old container."
-      warn "Continuing will recreate the sandbox WITHOUT your login and history."
-      if ! confirm "Continue anyway?"; then
-        err "Migration aborted. The old container was left untouched."
-      fi
-      tmp=""
-    fi
-  else
-    volume="$has_volume"
-    info "Container already uses volume '${volume}' — config will persist automatically."
+  if [[ -z "$had_volume" ]]; then
+    warn "This sandbox predates config volumes: its Claude login and history"
+    warn "live inside the container and are discarded with it."
+    confirm "Migrate anyway (Claude will ask you to log in again)?" \
+      || { info "Migration cancelled. Your sandbox is unchanged."; exit 1; }
   fi
 
-  info "Removing old container..."
-  docker rm -f "$container" >/dev/null
+  # Rename rather than remove, so the old container can be put back if the
+  # new one fails to start. It is deleted once the new one is up.
+  local old="${container}-old"
+  docker rm -f "$old" &>/dev/null || true
+  docker rename "$container" "$old" || err "Could not rename the old container. Nothing was changed."
 
-  info "Recreating container on the current image..."
-  docker run -dit \
-    --name "$container" \
-    --label "safe-claude.path=${abs}" \
-    --label "safe-claude.version=$(image_version)" \
-    -v "${abs}:/workspace" \
-    -v "${volume}:/home/node/.claude" \
-    "$IMAGE_NAME" \
-    > /dev/null
-
-  # Seed the new volume from the saved config.
-  if [[ -n "$tmp" && -d "$tmp/claude" ]]; then
-    info "Restoring Claude config into new container..."
-    docker cp "$tmp/claude/." "$container:/home/node/.claude/" \
-      || warn "Could not restore config — you may need to log in again."
-    docker exec -u 0 "$container" sh -c \
-      'chown -R 1000:1000 /home/node/.claude && chmod -R go-rwx /home/node/.claude' \
-      || true
-    success "Config restored."
+  info "Creating the new container on the current image..."
+  if ! docker run -dit \
+        --name "$container" \
+        --label "safe-claude.path=${abs}" \
+        --label "safe-claude.version=$(image_version)" \
+        -v "${abs}:/workspace" \
+        -v "${volume}:/home/node/.claude" \
+        "$IMAGE_NAME" \
+        > /dev/null
+  then
+    warn "Could not create the new container -- putting the old one back."
+    docker rename "$old" "$container" &>/dev/null \
+      || warn "Could not rename it back. Restore it with:  docker rename ${old} ${container}"
+    err "Migration aborted. Your sandbox is unchanged."
   fi
 
+  docker rm -f "$old" &>/dev/null \
+    || warn "Could not remove the old container. Remove it with:  docker rm -f ${old}"
+
+  if [[ -n "$had_volume" ]]; then
+    info "Config stays on volume '${volume}' -- your login and history came across."
+  fi
   success "Sandbox migrated. Enter it with:  safe-claude ${patharg}"
 }
 
-# ── command remove (opt-in for each container) ─────────────────────────────────────────────────────────
+# ── command remove (opt-in for each container) ──────────────────────────────
 cmd_remove() {
   local patharg=""
   while [[ $# -gt 0 ]]; do
@@ -432,12 +439,17 @@ cmd_remove() {
   docker container inspect "$container" &>/dev/null \
     || err "No sandbox exists for ${abs}. Nothing to remove."
 
+  # Read the volume off the container before it goes: a migrated sandbox may
+  # carry a volume named after an earlier container name.
+  local volume
+  volume="$(claude_volume_of "$container")"
+  volume="${volume:-${container}-claude}"
+
   info "Removing container '${container}'..."
   docker rm -f "$container" >/dev/null
   success "Sandbox removed."
   echo "  Your project files in ${abs} are untouched."
 
-  local volume="${container}-claude"
   if docker volume inspect "$volume" &>/dev/null; then
     if confirm "Also delete the '${volume}' volume (credentials, history, settings)?"; then
       docker volume rm "$volume" >/dev/null
@@ -487,7 +499,7 @@ require_image
 # ── container lifecycle ─────────────────────────────────────────────────────
 if ! docker container inspect "$CONTAINER" &>/dev/null; then
   # Container does not exist yet — create it.
-  # claude settings are stored in <path_to_folder>/.safe-claude so Claude's login and
+  # A per-sandbox named volume backs /home/node/.claude so Claude's login and
   # session history survive container recreation (e.g. 'safe-claude migrate').
   echo "No container found for this folder. Creating '${CONTAINER}'..."
   # run the docker container

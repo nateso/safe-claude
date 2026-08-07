@@ -201,3 +201,19 @@ else
 fi
 
 # ── done ─────────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "==========================================="
+Write-Host "  All done!"
+Write-Host "==========================================="
+Write-Host ""
+Write-Host "  Restart your terminal, then use:"
+Write-Host ""
+Write-Host "    safe-claude C:/path/to/your/project"
+Write-Host ""
+Write-Host "  This will create a sandboxed Docker container for that folder"
+Write-Host "  (if one doesn't exist yet) and launch Claude Code."
+Write-Host ""
+Write-Host "  Add --dangerously-skip-permissions to run Claude without prompts:"
+Write-Host ""
+Write-Host "    safe-claude C:/path/to/your/project --dangerously-skip-permissions"
+Write-Host ""
