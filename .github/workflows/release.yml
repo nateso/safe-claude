@@ -1,7 +1,12 @@
 name: Release
 
-# Publishes the safe-claude image to GitHub Container Registry on every
-# release tag. This way users don't have to clone the repo at all.
+# Publishes the safe-claude image to GitHub Container Registry and creates
+# a GitHub release with install.sh and safe-claude attached on every tag.
+#
+# Tag naming:
+#   v0.1.0         -> stable release, moves ghcr :latest and releases/latest
+#   v0.1.0-beta.1  -> prerelease (any tag with a '-'), does NOT touch :latest
+#                     or releases/latest; installable only by its own tag.
 #
 # One-time setup after the first release: make the 'safe-claude' package
 # public (GitHub -> Packages -> safe-claude -> Package settings -> Change
@@ -12,15 +17,29 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: read
-  packages: write
+  contents: write   # create the GitHub release
+  packages: write   # push to GHCR
 
 jobs:
-  publish-image:
-    name: build and push image
+  release:
+    name: build image and publish release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      # Detect prereleases from the tag name: anything with a '-' suffix
+      # (v0.1.0-beta.1, v0.1.0-rc1, ...) per semver.
+      - name: Determine release type
+        id: rel
+        run: |
+          IMAGE="ghcr.io/${{ github.repository }}"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT"
+            echo "tags=$IMAGE:$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=" >> "$GITHUB_OUTPUT"
+            echo "tags=$IMAGE:$GITHUB_REF_NAME,$IMAGE:latest" >> "$GITHUB_OUTPUT"
+          fi
 
       # arm64 so Apple Silicon Macs get a native image instead of emulation.
       - uses: docker/setup-qemu-action@v3
@@ -33,12 +52,26 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             SAFE_CLAUDE_VERSION=${{ github.ref_name }}
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:latest
+          tags: ${{ steps.rel.outputs.tags }}
+
+      - name: Stamp version and digest into scripts
+        run: |
+          DIGEST="ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+          sed -i \
+          -e "s|@VERSION@|${GITHUB_REF_NAME}|g" \
+          -e "s|@IMAGE_DIGEST@|${DIGEST}|g" \
+          install.sh safe-claude install.ps1 safe-claude.ps1
+
+      - name: Create GitHub release
+        run: |
+          gh release create "$GITHUB_REF_NAME" install.sh safe-claude install.ps1 safe-claude.ps1 \
+            --generate-notes ${{ steps.rel.outputs.prerelease }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
