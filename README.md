@@ -11,53 +11,56 @@ Run Claude Code inside an isolated Docker container with access to only one fold
 
 ## Requirements
 
-- Docker installed on your host machine
-- Git — used to clone this repository, and by `safe-claude update`
+- Docker installed and running on your host machine
 - An Anthropic Pro / Max account
 
 ---
 
 ## Quick Start
 
-### 1. Open Docker on your machine
+### 1. Start Docker on your machine
 
-Just open the application as you would open any application.
-
-### 2. Clone this Repository to your machine
-
-```bash
-# this will create a folder safe-claude in your current working directory with all code from this repository
-git clone https://github.com/nateso/safe-claude.git
-
-# enter the folder
-cd safe-claude
-```
-
-### 3. Run the installer
+### 2. Download and run the installer
 
 **macOS / Linux:**
 ```bash
-./install.sh
+curl -fsSL https://github.com/nateso/safe-claude/releases/latest/download/install.sh | bash
 ```
 
 **Windows** (PowerShell):
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+irm https://github.com/nateso/safe-claude/releases/latest/download/install.ps1 | iex
 ```
 
 The installer will:
-- Check that Docker is running
-- Build the `safe-claude` Docker image (takes a few minutes the first time)
-- Install the `safe-claude` command and put it on your PATH
+- Check that Docker is installed and running
+- Pull the `safe-claude` image for that release from GitHub Container Registry (`ghcr.io/nateso/safe-claude`)
+- Install the `safe-claude` command from the same release and put it on your PATH
 
-It picks the install location for you (`/usr/local/bin` on macOS/Linux, `%LOCALAPPDATA%\Programs\safe-claude` on Windows) and creates it if needed. To choose your own:
+Both installers take the release they belong to with them: the command, the image, and the installer always come from one and the same release, so an installed copy is a known-good set rather than whatever happens to be on `main` today.
+
+Where the command is installed:
+
+| | Default location | PATH |
+|---|---|---|
+| macOS / Linux | `/usr/local/bin` | already on PATH |
+| Windows | `%LOCALAPPDATA%\Programs\safe-claude` | added to your user PATH (needs no admin rights) |
+
+On Windows the installer also writes a `safe-claude.bat` wrapper, so `safe-claude` works from both CMD and PowerShell without typing `.ps1`.
+
+To install somewhere else, set `INSTALL_DIR` before running the installer — it works for the piped one-liners above:
 
 ```bash
-./install.sh --install-dir ~/.local/bin                                    # macOS / Linux
-powershell -ExecutionPolicy Bypass -File install.ps1 -InstallDir D:\tools  # Windows
+INSTALL_DIR="$HOME/.local/bin" bash -c "$(curl -fsSL https://github.com/nateso/safe-claude/releases/latest/download/install.sh)"
+```
+```powershell
+$env:INSTALL_DIR = "$HOME\bin"; irm https://github.com/nateso/safe-claude/releases/latest/download/install.ps1 | iex
 ```
 
-### 4. Use it
+If you have downloaded the installer to a file instead, the same thing is a flag: `--install-dir <path>` (bash) or `-InstallDir <path>` (PowerShell). Both also take `-y` / `-Yes` to skip the "reinstall over the existing copy?" prompt.
+
+### 3. Use it
+
 **macOS / Linux:**
 ```bash
 safe-claude /path/to/your/project
@@ -69,10 +72,9 @@ safe-claude C:\path\to\your\project
 ```
 
 That's it. The command will:
-- **Create** a new container that bind-mounts the specified folder at `/workspace`.
+- **Create** a new container that bind-mounts the specified folder at `/workspace` (only the first time for a given folder)
 - **Start** the container
-- **Drop you into a claude session** inside the container with `/workspace` pointing to your folder.
-
+- **Drop you into a Claude session** inside the container with `/workspace` pointing to your folder
 
 ### Skipping permission prompts
 
@@ -92,16 +94,31 @@ safe-claude C:\path\to\your\project --dangerously-skip-permissions
 
 Claude always runs as a non-root user (required — Claude Code refuses `--dangerously-skip-permissions` when running as root). On Linux it runs as *your* host user, so files it creates in the folder are owned by you rather than root or an unrelated container user; on macOS/Windows, Docker Desktop handles ownership. To install system packages, open a separate root shell: `docker exec -u root -it <container_name> bash`.
 
-> **Upgrading from an earlier version?** Run `safe-claude update`, then `safe-claude rebuild <path>` once for each sandbox you already have — see [Updating](#updating) below.
+> **Upgrading from an earlier version?** Run `safe-claude update`. It offers to move your existing sandboxes onto the new image for you — see [Updating](#updating) below.
+
+
+## Commands
+
+```
+safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox for a folder
+safe-claude update                              Update the tool + image to the latest release
+safe-claude list                                Show every sandbox and its state
+safe-claude migrate <path_to_folder>            Move an existing sandbox onto the new image
+safe-claude remove <path_to_folder>             Remove a sandbox (keeps your files)
+safe-claude --version                           Print the installed version
+safe-claude help                                Show every subcommand
+```
+
+`remove` also answers to `rm`; `--version` to `-v`; `help` to `--help` and `-h`.
 
 
 ## How containers are managed
 
-Each folder gets its own container. The container name is derived deterministically from the folder path (e.g. `safe-claude-myproject-a3f2b1c8`), so running `safe-claude /path/to/your/project` always connects to the same container.
+Each folder gets its own sandbox. The sandbox name is derived deterministically from the folder path (e.g. `safe-claude-myproject-a3f2b1c8`), so running `safe-claude /path/to/your/project` always connects to the same sandbox.
 
-Each container also gets a small per-folder Docker volume (`<container_name>-claude`) mounted at `/home/node/.claude`. This is where Claude Code stores your **login and session history**, so it survives the container being recreated (for example by `safe-claude rebuild`). Your project files are never stored here — they live on your host machine and are only bind-mounted in.
+Each sandbox also gets a small per-folder Docker volume (`<container_name>-claude`) mounted at `/home/node/.claude`. This is where Claude Code stores your **login and session history**, so it survives the sandbox being recreated (for example by `safe-claude migrate`). Your project files are never stored here — they live on your host machine and are only bind-mounted in.
 
-Sandboxes created **before** this version have no such volume: their login and history sit inside the container itself, where recreating it would destroy them. `safe-claude rebuild` migrates them onto a volume — see [Updating](#updating).
+Sandboxes created **before** volumes existed have no such volume: their login and history sit inside the container itself, where recreating it would destroy them. `migrate` tells you when this is the case and asks before going ahead.
 
 
 ## Listing your sandboxes
@@ -111,72 +128,62 @@ safe-claude list
 ```
 
 ```
-FOLDER     STATUS    IMAGE                 .claude    PATH
-gone       exited    current (a5697472)    volume     /Users/anna/old        (folder missing)
-myproject  running   current (a5697472)    volume     /Users/anna/code/myproject
-scratch    exited    outdated              in-image   /Users/anna/tmp/scratch
-thesis     exited    outdated (4ff9405a)   volume     /Users/anna/docs/thesis
+FOLDER     STATUS    IMAGE                 PATH
+gone       exited    outdated (v0.1.0)     /Users/anna/old  (folder missing)
+myproject  running   current (v0.2.0)      /Users/anna/code/myproject
+thesis     exited    outdated (v0.1.0)     /Users/anna/docs/thesis
 
-4 sandboxes.  2 on an older image.  1 without a persistent .claude volume.
+3 sandboxes.  2 on an older image.
 
-  Move a sandbox onto the current image (login/history preserved):
-      safe-claude rebuild /Users/anna/tmp/scratch
-      safe-claude rebuild /Users/anna/docs/thesis
+  Move a sandbox onto the current image:
+      safe-claude migrate /Users/anna/docs/thesis
+      safe-claude migrate /Users/anna/old
 ```
 
-- **IMAGE** — `current` if the sandbox runs the image you have now, `outdated` if not. The commit in brackets is the version it runs, and is omitted when the image carries no version stamp (rebuild the image to add one).
-- **`.claude`** — `volume` means your Claude login and session history are on a persistent volume and survive recreation. `in-image` means they are inside the container itself and would be lost if it were recreated.
+- **IMAGE** — `current` if the sandbox runs the image you have now, `outdated` if not. The version in brackets is the release it runs, and is omitted when the image carries no version stamp (update to get one).
 - **(folder missing)** — the host folder has been moved or deleted, so the sandbox has nothing to work on.
 
-Anything needing attention is printed with the exact `rebuild` command to fix it.
+Anything needing attention is printed with the exact `migrate` command to fix it.
 
 
 ## Updating
 
-To upgrade `safe-claude` to the latest version on `main`:
+To upgrade `safe-claude` to the latest release:
 
 ```bash
 safe-claude update
 ```
 
-`update` asks for confirmation, then fetches the newest version, replaces the installed `safe-claude` command, and rebuilds the Docker image. It is **non-destructive**: your existing sandboxes are left running exactly as they are.
+`update` takes no arguments. It looks up the newest release, and if you are already on it, says so and stops. Otherwise it downloads that release's installer, which pulls the new image and replaces the installed `safe-claude` command in the directory it currently lives in.
 
-- `-y` skips the confirmation prompt.
-- `--force` reinstalls even when you are already up to date, and rebuilds the image from scratch with the Docker layer cache disabled. Use it when you want to be certain the image picks up a fresh Claude Code install rather than a cached layer.
-
-New sandboxes you create after updating automatically use the new image. **Existing** sandboxes keep running the previous image until you explicitly move them over — run `safe-claude list` to see which ones, then:
+New sandboxes you create after updating automatically use the new image. **Existing** sandboxes keep running the previous image until they are recreated, so `update` finishes by listing the ones that are behind and offering to migrate them all in one go. Decline, and you can do them one at a time later:
 
 ```bash
-safe-claude rebuild /path/to/your/project      # add -y to skip the confirmation
+safe-claude migrate /path/to/your/project
 ```
 
-`rebuild` recreates that one sandbox on the new image. Your project files are never touched, and your Claude login and session history come across with it. This is the one step `safe-claude update` cannot do for you, because it means replacing the container — run it once per sandbox after your first update.
+`migrate` recreates that one sandbox on the current image. Your project files are never touched, and your Claude login and session history come across with it — they live on the sandbox's volume, which is remounted onto the new container. The old container is only deleted once the new one is up; if creation fails, the old one is put back and nothing is lost.
 
-Before replacing the container, `rebuild` saves a backup image of it (`safe-claude-backup-<folder>-<timestamp>`) as a safety net. **Note:** system packages you installed *inside* the container (via `apt`/`pip`) are not carried over automatically — reinstall them, or recover them from the backup image:
+**Note:** system packages you installed *inside* the container (via `apt` / `pip` / `install.packages`) are **not** carried over — the container itself is replaced. Reinstall them in the new sandbox.
+
+
+## Removing a sandbox
 
 ```bash
-docker run --rm -it <backup_image> bash    # look around the old container
-docker rmi <backup_image>                  # delete it once you are done
+safe-claude remove /path/to/your/project
 ```
 
-### If the backup fails
-
-Docker occasionally cannot make that backup and reports `NotFound: content digest ...: not found`. This is a fault in Docker's own image store, not a problem with your sandbox — `rebuild` works around it automatically and carries on.
-
-If the workaround fails too, `rebuild` stops rather than destroy a container it cannot back up. Either:
-
-- Restart Docker Desktop, or turn off **Settings → General → "Use containerd for pulling and storing images"**, then try again.
-- Rebuild without a backup, if there is nothing inside the container worth keeping: `safe-claude rebuild <path> --no-backup`.
-
-Your project files and your Claude login are unaffected either way.
+This removes the container and then asks separately whether to delete its `.claude` volume (login, history, settings). Your project files on the host are never touched.
 
 
 ## Checking your version
 
 ```bash
-safe-claude --version      # the commit you have installed
-safe-claude help           # every subcommand and flag
+safe-claude --version      # the release you have installed
+safe-claude help           # every subcommand
 ```
+
+The version is read from the stamp the release build put into the Docker image, so it tells you which image `safe-claude` is actually going to run.
 
 
 -----------
@@ -186,15 +193,15 @@ safe-claude help           # every subcommand and flag
 If you prefer to manage Docker manually, here are the individual steps:
 
 ```bash
-# build the image
-docker build -t safe-claude .
+# pull the image
+docker pull ghcr.io/nateso/safe-claude:latest
 
 # create the container
 # the second -v gives Claude a persistent home for its login/history
 docker run -dit --name your_container_name \
   -v /path/to/your/folder:/workspace \
   -v your_container_name-claude:/home/node/.claude \
-  safe-claude
+  ghcr.io/nateso/safe-claude:latest
 
 # enter the container
 docker exec -it your_container_name /bin/bash
@@ -209,12 +216,34 @@ You will notice you are inside the container because your command line path will
 
 To exit the container, type `exit` or press `Ctrl+D`.
 
+To pin a specific release instead of `:latest`, use its tag: `ghcr.io/nateso/safe-claude:v0.1.0`.
+
 ---
 
 ## What's included in the container
 
-- Node.js 20
-- Claude Code
+- Node.js 22
+- Claude Code, installed with Anthropic's native installer into `~/.local/bin` so its built-in auto-updater keeps working
 - Python 3, in a virtualenv at `/opt/venv` that `python` and `pip` resolve to
 - R
 - Common build tools (needed to compile R and Python native packages)
+
+`CLAUDE_CONFIG_DIR` points at `/home/node/.claude` so that Claude's account state (`.claude.json`) lands on the persistent volume together with the rest of its config — without it, recreating a container would drop you back into onboarding.
+
+---
+
+## Development
+
+Running the scripts straight from a checkout works: they detect that they carry no release stamp, fall back to `ghcr.io/nateso/safe-claude:latest`, and the installer takes the `safe-claude` script from next to itself instead of downloading a release asset.
+
+```bash
+# build the image locally
+docker build -t ghcr.io/nateso/safe-claude:latest .
+
+# install the checked-out scripts
+./install.sh --install-dir "$HOME/.local/bin"
+```
+
+Releases are cut by pushing a tag. `v0.1.0` builds and pushes the multi-arch image, stamps the version and image digest into the four scripts, and attaches them to a GitHub release; a tag with a suffix (`v0.1.0-beta.1`) is published as a prerelease and does not move `:latest`.
+
+CI checks both scripts on every push: `bash -n` and ShellCheck for the bash side, the PowerShell parser and PSScriptAnalyzer for the Windows side, plus a CLI contract suite that runs the same set of argument cases against `safe-claude` and against `safe-claude.ps1` under both Windows PowerShell 5.1 and PowerShell 7.
