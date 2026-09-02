@@ -41,13 +41,16 @@ param(
 )
 
 # Stamped by CI at release time.
-$VERSION    = '@VERSION@'
-$IMAGE_NAME = '@IMAGE_DIGEST@'      # ghcr.io/nateso/safe-claude@sha256:...
-$REPO       = 'nateso/safe-claude'
+# Named $ScriptVersion, not $VERSION: PowerShell variable names are
+# case-insensitive, so a '$VERSION' constant *is* the [switch]$Version parameter
+# above, and assigning a string to it throws a cast error on every run.
+$ScriptVersion = '@VERSION@'
+$IMAGE_NAME    = '@IMAGE_DIGEST@'   # ghcr.io/nateso/safe-claude@sha256:...
+$REPO          = 'nateso/safe-claude'
 
-if ($VERSION -like '@*@') {
-    $VERSION    = 'dev'
-    $IMAGE_NAME = "ghcr.io/${REPO}:latest"
+if ($ScriptVersion -like '@*@') {
+    $ScriptVersion = 'dev'
+    $IMAGE_NAME    = "ghcr.io/${REPO}:latest"
 }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -291,11 +294,11 @@ function Invoke-Update {
     $latest = Get-LatestRelease
     if (-not $latest) { Write-Err "Could not determine the latest release. Check your connection." }
 
-    if ($VERSION -eq $latest) {
-        Write-Success "Already up to date ($VERSION)."
+    if ($ScriptVersion -eq $latest) {
+        Write-Success "Already up to date ($ScriptVersion)."
         return
     }
-    Write-Info "Updating $VERSION -> $latest..."
+    Write-Info "Updating $ScriptVersion -> $latest..."
 
     $self  = $PSCommandPath   # the installed safe-claude.ps1 currently running
     $psExe = Get-PowerShellPath
