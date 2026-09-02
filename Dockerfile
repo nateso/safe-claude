@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # install system dependencies
 # 1. Core utilities (it etc)
@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a venv and add it to PATH so python/pip always resolve to it
-RUN python3 -m venv /opt/venv
+RUN python3 -m venv /opt/venv && chown -R node:node /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # set the working directory
@@ -36,8 +36,10 @@ ENV HOME=/home/node
 # ~/.claude directory that safe-claude backs with a volume. Point it inside, or
 # recreating the container drops you back into onboarding.
 ENV CLAUDE_CONFIG_DIR=/home/node/.claude
+
 # Anthropic's native installer puts claude in ~/.local/bin, so add it to PATH.
 ENV PATH="/home/node/.local/bin:$PATH"
+
 USER node
 
 # Install Claude Code with Anthropic's native installer (NOT `npm install -g`).
