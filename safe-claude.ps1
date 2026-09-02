@@ -5,11 +5,12 @@
 
 .DESCRIPTION
     safe-claude.ps1 <path_to_folder> [claude-args...]   Enter/create a sandbox
-    safe-claude.ps1 update                              Update tool + image to latest release
+    safe-claude.ps1 update                              Update the tool + image to the latest release
     safe-claude.ps1 list                                Show every sandbox and its state
-    safe-claude.ps1 migrate <path_to_folder>            Move a sandbox onto the new image
+    safe-claude.ps1 migrate <path_to_folder>            Move an existing sandbox onto the new image
     safe-claude.ps1 remove <path_to_folder>             Remove a sandbox (keeps your files)
     safe-claude.ps1 --version                           Print the installed version
+    safe-claude.ps1 help                                Show every subcommand
 
     Entering a folder resolves it to an absolute path, derives a stable
     container name, creates the container if needed (with a persistent volume
@@ -19,7 +20,7 @@
 
 .PARAMETER FolderPath
     Path to the folder you want Claude to work in, OR a subcommand
-    ('update', 'list', 'migrate', 'remove', '--version').
+    ('update', 'list', 'migrate', 'remove', 'help', '--version').
 #>
 
 param(
@@ -68,15 +69,15 @@ function Show-Usage {
     Write-Host "  safe-claude migrate <path_to_folder>            Move an existing sandbox onto the new image"
     Write-Host "  safe-claude remove <path_to_folder>             Remove a sandbox (keeps your files)"
     Write-Host "  safe-claude --version                           Print the installed version"
+    Write-Host "  safe-claude help                                Show every subcommand"
     Write-Host ""
     Write-Host "  Entering a folder creates its container if it does not exist yet and"
     Write-Host "  launches Claude Code. Any extra arguments are forwarded to 'claude', e.g.:"
     Write-Host ""
     Write-Host "    safe-claude C:\project --dangerously-skip-permissions"
     Write-Host ""
-    Write-Host ""
-    Write-Host "  First install the safe-claude command via: "
-    Write-Host "      irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex"
+    Write-Host "  First install the safe-claude command via:"
+    Write-Host "      irm https://github.com/$REPO/releases/latest/download/install.ps1 | iex"
 }
 
 # Ask a yes/no question; returns $true for yes. Default is No.
@@ -578,15 +579,24 @@ function Invoke-Remove {
     if (-not $volume) { $volume = Get-VolumeName -ContainerName $container }
 
     Write-Info "Removing container '$container'..."
+    # Docker's own error goes to the console; without this check it would be
+    # followed by 'Sandbox removed.' and a zero exit code.
     docker rm -f $container | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Err "Could not remove container '$container'." }
     Write-Success "Sandbox removed."
     Write-Host "  Your project files in $abs are untouched."
 
     $null = docker volume inspect $volume 2>&1
     if ($LASTEXITCODE -eq 0) {
         if (Confirm-Action "Also delete the '$volume' volume (credentials, history, settings)?") {
+            # A warning, not an error: the container is already gone, so there is
+            # nothing left to abort -- just tell the user what is still there.
             docker volume rm $volume | Out-Null
-            Write-Success "Claude config removed."
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn "Could not remove the volume. Remove it with:  docker volume rm $volume"
+            } else {
+                Write-Success "Claude config removed."
+            }
         } else {
             Write-Info "Kept volume '$volume'."
             Write-Host "  List volumes:    docker volume ls"
@@ -611,16 +621,22 @@ $requested = @()
 if ($FolderPath) { $requested += $FolderPath }
 if ($ClaudeArgs) { $requested += $ClaudeArgs }
 
+$namedASubcommand = $FolderPath -and ($subcommands -contains $FolderPath)
+
 $namedAFolder = $FolderPath -and
                 ($versionTokens -notcontains $FolderPath) -and
                 ($helpTokens    -notcontains $FolderPath) -and
-                ($subcommands   -notcontains $FolderPath)
+                -not $namedASubcommand
 
-if ($namedAFolder) {
-    # A folder was named, so '--help' / '--version' were meant for claude, not
-    # for us. Hand them back rather than swallowing them. The Where-Object is
-    # load-bearing: @($null) is a one-element array holding $null, which would
-    # otherwise pass an empty argument through to claude.
+if ($namedAFolder -or $namedASubcommand) {
+    # Something else owns these tokens: claude when a folder was named, and the
+    # subcommand's own argument check when a subcommand was. Either way, hand
+    # them back rather than swallowing them -- 'safe-claude update --version'
+    # must be rejected by 'update', not silently answered with the version, and
+    # without this the token would have vanished into the bound switch and
+    # 'update' would have run for real. The Where-Object is load-bearing:
+    # @($null) is a one-element array holding $null, which would otherwise pass
+    # an empty argument through.
     if ($Help)    { $ClaudeArgs = @(@($ClaudeArgs) | Where-Object { $_ }) + '--help' }
     if ($Version) { $ClaudeArgs = @(@($ClaudeArgs) | Where-Object { $_ }) + '--version' }
 } else {

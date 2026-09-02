@@ -3,11 +3,12 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox
-# safe-claude update                              Update tool + image to latest
+# safe-claude update                              Update the tool + image to the latest release
 # safe-claude list                                Show every sandbox and its state
-# safe-claude migrate <path_to_folder>            migrates the sandbox to the new image
-# safe-claude remove <path>                       Remove a sandbox
-# safe-claude --version                           Show installed version
+# safe-claude migrate <path_to_folder>            Move an existing sandbox onto the new image
+# safe-claude remove <path_to_folder>             Remove a sandbox (keeps your files)
+# safe-claude --version                           Print the installed version
+# safe-claude help                                Show every subcommand
 #
 # Enter (or create) a Docker container that mounts the given folder as
 # /workspace and has Claude Code pre-installed.
@@ -29,20 +30,20 @@ fi
 usage() {
   echo "Usage:"
   echo "  safe-claude <path_to_folder> [claude-args...]   Enter/create a sandbox for a folder"
-  echo "  safe-claude update                              Update the tool + image to latest main"
+  echo "  safe-claude update                              Update the tool + image to the latest release"
   echo "  safe-claude list                                Show every sandbox and its state"
   echo "  safe-claude migrate <path_to_folder>            Move an existing sandbox onto the new image"
   echo "  safe-claude remove <path_to_folder>             Remove a sandbox (keeps your files)"
   echo "  safe-claude --version                           Print the installed version"
+  echo "  safe-claude help                                Show every subcommand"
   echo ""
   echo "  Entering a folder creates its container if it does not exist yet and"
   echo "  launches Claude Code. Any extra arguments are forwarded to 'claude', e.g.:"
   echo ""
   echo "    safe-claude ~/project --dangerously-skip-permissions"
   echo ""
-  echo ""
-  echo "  First install the safe-claude command via: "
-  echo '      curl -fsSL https://github.com/nateso/safe-claude/releases/latest/download/install.sh | bash'
+  echo "  First install the safe-claude command via:"
+  echo "      curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash"
 }
 
 err() {
@@ -51,8 +52,8 @@ err() {
 }
 
 info()    { echo "[safe-claude] $*"; }
-success() { echo "[safe-claude] OK $*"; }
-warn()    { echo "[safe-claude] ! $*"; }
+success() { echo "[safe-claude] OK  $*"; }
+warn()    { echo "[safe-claude] !   $*"; }
 
 # Ask a yes/no question; returns 0 for yes. Default is No.
 confirm() {
@@ -212,7 +213,6 @@ cmd_update() {
       stale_paths+=("$path")
     fi
   done < <(docker inspect --format "$tmpl" $names 2>/dev/null || true)
-
 
   if [[ ${#stale_paths[@]} -gt 0 ]]; then
     echo ""
@@ -461,7 +461,6 @@ cmd_remove() {
   fi
 }
 
-
 # ── command dispatch ─────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -497,10 +496,10 @@ require_image
 
 # ── container lifecycle ─────────────────────────────────────────────────────
 if ! docker container inspect "$CONTAINER" &>/dev/null; then
-  # Container does not exist yet — create it.
+  # Container does not exist yet -- create it.
   # A per-sandbox named volume backs /home/node/.claude so Claude's login and
   # session history survive container recreation (e.g. 'safe-claude migrate').
-  echo "No container found for this folder. Creating '${CONTAINER}'..."
+  info "No container found for this folder. Creating '${CONTAINER}'..."
   # run the docker container
   docker run -dit \
     --name "$CONTAINER" \
@@ -510,19 +509,19 @@ if ! docker container inspect "$CONTAINER" &>/dev/null; then
     -v "${CONTAINER}-claude:/home/node/.claude" \
     "$IMAGE_NAME" \
     > /dev/null
-  echo "Container created."
+  info "Container created."
 else
-  # Container exists — start it if it is not already running
+  # Container exists -- start it if it is not already running
   STATUS=$(docker container inspect --format '{{.State.Status}}' "$CONTAINER")
   if [[ "$STATUS" != "running" ]]; then
-    echo "Starting container '${CONTAINER}'..."
+    info "Starting container '${CONTAINER}'..."
     docker start "$CONTAINER" > /dev/null
   fi
 fi
 
 # ── enter the container ─────────────────────────────────────────────────────
 
-echo "Entering container '${CONTAINER}' (folder: ${ABS_PATH})..."
+info "Entering container '${CONTAINER}' (folder: ${ABS_PATH})..."
 
 # Non-blocking heads-up if skip-permissions was requested.
 case " $* " in
@@ -555,6 +554,6 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   fi
 fi
 
-echo "Type 'exit' or press Ctrl+D to leave the container."
+info "Type 'exit' or press Ctrl+D to leave the container."
 echo ""
 docker exec -it -u "$RUN_USER" -e HOME=/home/node "$CONTAINER" claude "$@"

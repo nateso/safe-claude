@@ -155,7 +155,7 @@ if ($imagePresent) {
     Write-Info "Pulling safe-claude image for $VERSION (this may take a few minutes)..."
     docker pull $IMAGE_NAME
     if ($LASTEXITCODE -ne 0) {
-        Write-Err "Could not pull the image. Check your internet connection, and that`n         the 'safe-claude' package on GHCR is public."
+        Write-Err "Could not pull the image. Check your internet connection."
     }
     Write-Success "Image pulled successfully."
     # Digest pulls show up as <none> in 'docker images'; give it a readable tag.
@@ -167,9 +167,9 @@ if ($imagePresent) {
 
 Write-Host ""
 Write-Info "Installing the 'safe-claude' command to:"
-Write-Host "               $targetDir"
+Write-Host "              $targetDir"
 if ($usingDefault) {
-    Write-Host "             (to put it somewhere else, re-run with:  -InstallDir <path>)"
+    Write-Host "              (to put it somewhere else, re-run with:  -InstallDir <path>)"
 }
 
 if (-not (Test-Path -LiteralPath $targetDir)) {
@@ -232,9 +232,11 @@ try {
 }
 
 # .bat wrapper so 'safe-claude' works from CMD and PowerShell without typing .ps1
+# -NoProfile: the user's PowerShell profile has no business running here, and its
+# output would be interleaved with safe-claude's on every single invocation.
 @"
 @echo off
-powershell.exe -ExecutionPolicy Bypass -File "%~dp0safe-claude.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0safe-claude.ps1" %*
 "@ | Set-Content -Path $destBat -Encoding ASCII
 
 Write-Success "'safe-claude' $VERSION installed to '$destPs1'."

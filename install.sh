@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# install.sh — Guided installation for safe-claude
+# install.sh -- Guided installation for safe-claude
 #
 # 1. Checks prerequisites (Docker)
 # 2. Pulls the pinned 'safe-claude' Docker image from GHCR
@@ -21,8 +21,8 @@ DEFAULT_INSTALL_DIR="/usr/local/bin"
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 info()    { echo "[safe-claude] $*"; }
-success() { echo "[safe-claude] OK $*"; }
-warn()    { echo "[safe-claude] ! $*"; }
+success() { echo "[safe-claude] OK  $*"; }
+warn()    { echo "[safe-claude] !   $*"; }
 err()     { echo "[safe-claude] Error: $*" >&2; exit 1; }
 
 # Unstamped copy (run from a repo checkout, not a release) -> dev fallback.
@@ -84,8 +84,6 @@ success "Docker is available and running."
 # check whether in DEV mode
 [[ "$DEV_MODE" -eq 1 ]] && warn "Unstamped development copy -- using ':latest' and the repo checkout."
 
-
-# --- Check existing installation of safe-claude -----------------------------
 # --- Check existing installation of safe-claude -----------------------------
 EXISTING="$(command -v safe-claude 2>/dev/null || true)"
 if [[ -n "$EXISTING" ]]; then
@@ -108,7 +106,6 @@ if [[ -n "$EXISTING" ]]; then
   fi
 fi
 
-
 # ── step 2: pull the Docker image ───────────────────────────────────────────
 
 echo ""
@@ -122,8 +119,7 @@ else
     # Digest pulls show up as <none> in 'docker images'; give it a readable tag.
     [[ "$DEV_MODE" -eq 0 ]] && docker tag "$IMAGE_NAME" "ghcr.io/${REPO}:${VERSION}"
   else
-    err "Could not pull the image. Check your internet connection, and that
-             the 'safe-claude' package on GHCR is public."
+    err "Could not pull the image. Check your internet connection."
   fi
 fi
 
@@ -132,9 +128,9 @@ fi
 
 echo ""
 info "Installing the 'safe-claude' command to:"
-echo "               ${INSTALL_DIR}"
+echo "              ${INSTALL_DIR}"
 if [[ "$USING_DEFAULT" -eq 1 ]]; then
-  echo "             (to put it somewhere else, re-run with:  --install-dir <path>)"
+  echo "              (to put it somewhere else, re-run with:  --install-dir <path>)"
 fi
 
 if [[ ! -d "$INSTALL_DIR" ]]; then
@@ -176,7 +172,7 @@ bash -n "$TMP_SCRIPT" || err "Downloaded script fails a syntax check."
 if [[ -w "$INSTALL_DIR" ]]; then
   install -m 755 "$TMP_SCRIPT" "$STAGED" && mv -f "$STAGED" "$DEST"
 else
-  info "Directory '${INSTALL_DIR}' requires elevated permissions — running with sudo."
+  info "Directory '${INSTALL_DIR}' requires elevated permissions -- running with sudo."
   sudo install -m 755 "$TMP_SCRIPT" "$STAGED" && sudo mv -f "$STAGED" "$DEST"
 fi
 
@@ -187,7 +183,7 @@ success "'safe-claude' ${VERSION} installed to '${DEST}'."
 echo ""
 FOUND="$(command -v safe-claude 2>/dev/null || true)"
 if [[ "$FOUND" == "$DEST" ]]; then
-  success "Installation verified — 'safe-claude' is on your PATH."
+  success "Installation verified -- 'safe-claude' is on your PATH."
 elif [[ -n "$FOUND" ]]; then
   warn "Another copy at '${FOUND}' shadows the one just installed to '${DEST}'."
   warn "Remove it, or re-run with:  --install-dir $(dirname "$FOUND")"
@@ -208,7 +204,7 @@ echo "==========================================="
 echo ""
 echo "  Restart your terminal, then use:"
 echo ""
-echo "    safe-claude C:/path/to/your/project"
+echo "    safe-claude /path/to/your/project"
 echo ""
 echo "  This will create a sandboxed Docker container for that folder"
 echo "  (if one doesn't exist yet) and launch Claude Code."

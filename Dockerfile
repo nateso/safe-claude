@@ -1,7 +1,7 @@
 FROM node:22-slim
 
 # install system dependencies
-# 1. Core utilities (it etc)
+# 1. Core utilities (git etc)
 # 2. C/C++ build toolchain (needed to compile R/Python native packages)
 # 3. SSL / HTTP (libcurl used by R to download packages)
 # 4. XML (used by many R packages)
